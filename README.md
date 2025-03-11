@@ -1,6 +1,6 @@
 # InfluxDB MCP Server
 
-A Model Context Protocol (MCP) server that exposes access to an InfluxDB instance using the InfluxDB OSS API v2.
+A Model Context Protocol (MCP) server that exposes access to an InfluxDB instance using the InfluxDB OSS API v2. Mostly built with Claude Code.
 
 ## Features
 
@@ -98,14 +98,14 @@ Add the server to your `claude_desktop_config.json`:
 
 ```json
 {
-  \"mcpServers\": {
-    \"influxdb\": {
-      \"command\": \"npx\",
-      \"args\": [\"influxdb-mcp-server\"],
-      \"env\": {
-        \"INFLUXDB_TOKEN\": \"your_token\",
-        \"INFLUXDB_URL\": \"http://localhost:8086\",
-        \"INFLUXDB_ORG\": \"your_org\"
+  "mcpServers": {
+    "influxdb": {
+      "command": "npx",
+      "args": ["influxdb-mcp-server"],
+      "env": {
+        "INFLUXDB_TOKEN": "your_token",
+        "INFLUXDB_URL": "http://localhost:8086",
+        "INFLUXDB_ORG": "your_org"
       }
     }
   }
