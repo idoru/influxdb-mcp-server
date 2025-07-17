@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/idoru-influxdb-mcp-server-badge.jpg)](https://mseep.ai/app/idoru-influxdb-mcp-server)
+
 # InfluxDB MCP Server
 
 A Model Context Protocol (MCP) server that exposes access to an InfluxDB instance using the InfluxDB OSS API v2. Mostly built with Claude Code.
