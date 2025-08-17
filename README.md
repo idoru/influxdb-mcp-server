@@ -4,6 +4,8 @@
 
 [![smithery badge](https://smithery.ai/badge/@idoru/influxdb-mcp-server)](https://smithery.ai/server/@idoru/influxdb-mcp-server)
 
+[![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/idoru/influxdb-mcp-server)](https://archestra.ai/mcp-catalog/idoru__influxdb-mcp-server)
+
 A Model Context Protocol (MCP) server that exposes access to an InfluxDB instance using the InfluxDB OSS API v2. Mostly built with Claude Code.
 
 ## Features
