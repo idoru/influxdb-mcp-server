@@ -48,6 +48,6 @@
     "wait-for-expect": "^3.0.2"
   },
   "engines": {
-    "node": ">=14.16.0"
+    "node": ">=18.0.0"
   }
 }
