@@ -102,7 +102,7 @@ npm install
 INFLUXDB_TOKEN=your_token npm start
 ```
 
-You can also start the server with Streamable HTTP transport by providing the `--http` option with an optional port number (defaults to 3000). This mode uses an internal Express.js server:
+`influxdb-mcp-server` uses stdio transport by default. You can explicitly request it with `--stdio`, or start the server with Streamable HTTP transport by providing the `--http` option with an optional port number (defaults to 3000). This mode uses an internal Express.js server:
 
 ```bash
 # Start with Streamable HTTP transport on default port 3000
@@ -115,6 +115,8 @@ INFLUXDB_TOKEN=your_token npm start -- --http 8080
 If you installed globally or are using npx, you can run:
 ```bash
 INFLUXDB_TOKEN=your_token influxdb-mcp-server --http
+# or explicitly force stdio
+INFLUXDB_TOKEN=your_token influxdb-mcp-server --stdio
 # or
 INFLUXDB_TOKEN=your_token influxdb-mcp-server --http 8080
 ```

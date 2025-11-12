@@ -36,9 +36,15 @@ validateEnvironment();
 // Parse command-line arguments
 program
   .option("--http [port]", "Start server with Streamable HTTP transport on specified port (default: 3000)")
+  .option("--stdio", "Force stdio transport (default behavior)")
   .parse(process.argv);
 
 const options = program.opts();
+
+if (options.http !== undefined && options.stdio) {
+  console.error("Cannot use --http and --stdio at the same time. Please choose one transport.");
+  process.exit(1);
+}
 
 // Function to create and configure a new MCP server instance
 const createMcpServer = () => {
@@ -173,7 +179,9 @@ if (globalServer.server && !options.http) { // Only apply this if not in HTTP mo
 // for StdioServerTransport vs StreamableHTTPServerTransport.
 // This will be addressed in the next step when setting up the Express server.
 
-if (!options.http) {
+const useHttpTransport = options.http !== undefined;
+
+if (!useHttpTransport) {
   // Start the server with stdio transport
   console.log("Starting MCP server with stdio transport...");
   const stdioTransport = new StdioServerTransport();
