@@ -935,23 +935,26 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
           } (timeout: ${timeoutMs}ms)`,
         );
 
-        // Execute the promise with a timeout
-        return await Promise.race([
-          promise,
-          new Promise((_, reject) =>
-            setTimeout(
-              () => {
-                console.error(
-                  `${operationName} timed out after ${timeoutMs}ms - this likely indicates the server is not handling the request`,
-                );
-                reject(
-                  new Error(`${operationName} timed out after ${timeoutMs}ms`),
-                );
-              },
-              timeoutMs,
-            )
-          ),
-        ]);
+        // Execute the promise with a timeout. Clear the timer if the promise
+        // settles so Jest doesn't see stray console.error calls after tests end.
+        return await new Promise((resolve, reject) => {
+          const timeoutId = setTimeout(() => {
+            console.error(
+              `${operationName} timed out after ${timeoutMs}ms - this likely indicates the server is not handling the request`,
+            );
+            reject(new Error(`${operationName} timed out after ${timeoutMs}ms`));
+          }, timeoutMs);
+
+          promise
+            .then((value) => {
+              clearTimeout(timeoutId);
+              resolve(value);
+            })
+            .catch((err) => {
+              clearTimeout(timeoutId);
+              reject(err);
+            });
+        });
       } catch (error) {
         lastError = error;
         console.log(
