@@ -50,11 +50,30 @@ schema.measurements(bucket: "${bucketName}")`,
     const responseText = await response.text();
 
     console.log("Parsing CSV response...");
-    const lines = responseText.split("\n").filter((line) => line.trim() !== "");
+    const lines = responseText
+      .split("\n")
+      .map((line) => line.replace(/\r/g, ""))
+      .filter((line) => line.trim() !== "");
     console.log(`Found ${lines.length} lines in the response`);
 
-    // Parse CSV response (Flux queries return CSV)
-    const headers = lines[0].split(",");
+    // Flux CSV responses include metadata rows that start with '#'
+    const dataLines = lines.filter((line) => !line.startsWith("#"));
+    console.log(`Found ${dataLines.length} data lines after removing metadata`);
+
+    if (dataLines.length === 0) {
+      console.log("No data rows found in the response");
+      return {
+        contents: [{
+          uri: uri.href,
+          text: JSON.stringify({
+            bucket: bucketName,
+            measurements: [],
+          }),
+        }],
+      };
+    }
+
+    const headers = dataLines[0].split(",").map((header) => header.trim());
     const valueIndex = headers.indexOf("_value");
     console.log("Headers:", headers);
     console.log("Value index:", valueIndex);
@@ -73,25 +92,20 @@ schema.measurements(bucket: "${bucketName}")`,
     }
 
     console.log("Extracting measurement values...");
-    const measurements = lines.slice(1)
-      .map((line) => line.split(",")[valueIndex])
-      .filter((m) => m && !m.startsWith("#"))
-      .join("\n");
+    const measurements = dataLines.slice(1)
+      .map((line) => line.split(",")[valueIndex] || "")
+      .map((value) => value.trim())
+      .filter((m) => m !== "");
 
-    console.log(`Found ${measurements.split("\n").length} measurements`);
+    console.log(`Found ${measurements.length} measurements`);
     console.log("Successfully processed measurements request - END");
-
-    // Create a proper JSON structure for measurements
-    const measurementsArray = measurements.split("\n").filter((m) =>
-      m.trim() !== ""
-    );
 
     return {
       contents: [{
         uri: uri.href,
         text: JSON.stringify({
           bucket: bucketName,
-          measurements: measurementsArray,
+          measurements,
         }),
       }],
     };
