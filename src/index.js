@@ -74,42 +74,87 @@ const createMcpServer = () => {
   // Register tools
   server.tool(
     "write-data",
+    "Stream newline-delimited line protocol records into a bucket. Use this after composing measurements so the LLM can insert real telemetry, optionally controlling timestamp precision.",
     {
-      org: z.string().describe("The organization name"),
-      bucket: z.string().describe("The bucket name"),
-      data: z.string().describe("Data in InfluxDB line protocol format"),
-      precision: z.enum(["ns", "us", "ms", "s"]).optional().describe(
-        "Timestamp precision (ns, us, ms, s)",
-      ),
+      org: z
+        .string()
+        .describe(
+          "Human-readable organization name that owns the destination bucket (the same value returned by the orgs resource).",
+        ),
+      bucket: z
+        .string()
+        .describe(
+          "Bucket name to receive the points. Make sure it already exists or call create-bucket first.",
+        ),
+      data: z
+        .string()
+        .describe(
+          "Payload containing one or more line protocol lines (measurements, tags, fields, timestamps) separated by newlines.",
+        ),
+      precision: z
+        .enum(["ns", "us", "ms", "s"])
+        .optional()
+        .describe(
+          "Optional timestamp precision. Provide it only when the line protocol omits unit suffix context; defaults to nanoseconds.",
+        ),
     },
     writeData,
   );
   server.tool(
     "query-data",
+    "Execute a Flux query inside an organization to inspect measurement schemas, run aggregations, or validate recently written data.",
     {
-      org: z.string().describe("The organization name"),
-      query: z.string().describe("Flux query string"),
+      org: z
+        .string()
+        .describe(
+          "Organization whose buckets the query should target (exact name, not ID).",
+        ),
+      query: z
+        .string()
+        .describe(
+          "Flux query text. Multi-line strings are supported; results are returned as annotated CSV for easy parsing.",
+        ),
     },
     queryData,
   );
   server.tool(
     "create-bucket",
+    "Provision a new bucket under an organization so that subsequent write-data calls have a destination.",
     {
-      name: z.string().describe("The bucket name"),
-      orgID: z.string().describe("The organization ID"),
-      retentionPeriodSeconds: z.number().optional().describe(
-        "Retention period in seconds (optional)",
-      ),
+      name: z
+        .string()
+        .describe(
+          "Friendly bucket name. Follow InfluxDB naming rules (alphanumeric, dashes, underscores).",
+        ),
+      orgID: z
+        .string()
+        .describe(
+          "Organization ID (UUID) that will own the bucket. Retrieve it from the organizations resource or create-org output.",
+        ),
+      retentionPeriodSeconds: z
+        .number()
+        .optional()
+        .describe(
+          "Optional retention duration expressed in seconds. Omit for infinite retention.",
+        ),
     },
     createBucket,
   );
   server.tool(
     "create-org",
+    "Create a brand-new organization to isolate users or projects before generating buckets and tokens.",
     {
-      name: z.string().describe("The organization name"),
-      description: z.string().optional().describe(
-        "Organization description (optional)",
-      ),
+      name: z
+        .string()
+        .describe(
+          "Display name for the organization as it should appear in InfluxDB Cloud/OSS.",
+        ),
+      description: z
+        .string()
+        .optional()
+        .describe(
+          "Optional free-form description that helps humans understand why the org exists.",
+        ),
     },
     createOrg,
   );
