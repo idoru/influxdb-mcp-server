@@ -8,7 +8,7 @@ import { program } from "commander";
 import express from "express";
 
 // Import config
-import { validateEnvironment } from "./config/env.js";
+import { validateEnvironment, DEFAULT_ORG, DEFAULT_BUCKET } from "./config/env.js";
 
 // Import utilities
 import { configureLogger } from "./utils/loggerConfig.js";
@@ -74,17 +74,19 @@ const createMcpServer = () => {
   // Register tools
   server.tool(
     "write-data",
-    "Stream newline-delimited line protocol records into a bucket. Use this after composing measurements so the LLM can insert real telemetry, optionally controlling timestamp precision.",
+    `Stream newline-delimited line protocol records into a bucket. Use this after composing measurements so the LLM can insert real telemetry, optionally controlling timestamp precision.${DEFAULT_ORG ? ` Default org: "${DEFAULT_ORG}".` : ""}${DEFAULT_BUCKET ? ` Default bucket: "${DEFAULT_BUCKET}".` : ""}`,
     {
       org: z
         .string()
+        .optional()
         .describe(
-          "Human-readable organization name that owns the destination bucket (the same value returned by the orgs resource).",
+          `Organization name that owns the destination bucket.${DEFAULT_ORG ? ` Defaults to "${DEFAULT_ORG}" if omitted.` : ""}`,
         ),
       bucket: z
         .string()
+        .optional()
         .describe(
-          "Bucket name to receive the points. Make sure it already exists or call create-bucket first.",
+          `Bucket name to receive the points.${DEFAULT_BUCKET ? ` Defaults to "${DEFAULT_BUCKET}" if omitted.` : " Make sure it already exists or call create-bucket first."}`,
         ),
       data: z
         .string()
@@ -102,12 +104,13 @@ const createMcpServer = () => {
   );
   server.tool(
     "query-data",
-    "Execute a Flux query inside an organization to inspect measurement schemas, run aggregations, or validate recently written data.",
+    `Execute a Flux query inside an organization to inspect measurement schemas, run aggregations, or validate recently written data.${DEFAULT_ORG ? ` Default org: "${DEFAULT_ORG}".` : ""}`,
     {
       org: z
         .string()
+        .optional()
         .describe(
-          "Organization whose buckets the query should target (exact name, not ID).",
+          `Organization whose buckets the query should target.${DEFAULT_ORG ? ` Defaults to "${DEFAULT_ORG}" if omitted.` : ""}`,
         ),
       query: z
         .string()
