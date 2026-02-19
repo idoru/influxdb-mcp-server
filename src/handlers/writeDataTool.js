@@ -1,8 +1,23 @@
 import fetch from "node-fetch";
-import { INFLUXDB_TOKEN, INFLUXDB_URL } from "../config/env.js";
+import { INFLUXDB_TOKEN, INFLUXDB_URL, DEFAULT_ORG, DEFAULT_BUCKET } from "../config/env.js";
 
 // Tool: Write Data
-export async function writeData({ org, bucket, data, precision }) {
+export async function writeData({ org: orgParam, bucket: bucketParam, data, precision }) {
+  const org = orgParam || DEFAULT_ORG;
+  const bucket = bucketParam || DEFAULT_BUCKET;
+
+  if (!org) {
+    return {
+      content: [{ type: "text", text: "Error: org is required. Provide it as a parameter or set INFLUXDB_ORG environment variable." }],
+      isError: true,
+    };
+  }
+  if (!bucket) {
+    return {
+      content: [{ type: "text", text: "Error: bucket is required. Provide it as a parameter or set INFLUXDB_BUCKET environment variable." }],
+      isError: true,
+    };
+  }
   // Add extremely clear logging
   console.log(`=== WRITE-DATA TOOL CALLED ===`);
   console.log(
