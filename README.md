@@ -8,6 +8,10 @@
 
 A Model Context Protocol (MCP) server that exposes access to an InfluxDB v2 instance using the InfluxDB OSS API v2. Mostly built with Claude Code.
 
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/idoru-influxdb-mcp-server).
+
 ## Features
 
 This MCP server provides:
