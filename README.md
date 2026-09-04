@@ -2,7 +2,7 @@
 
 # InfluxDB v2 MCP Server
 
-[![smithery badge](https://smithery.ai/badge/@idoru/influxdb-mcp-server)](https://smithery.ai/server/@idoru/influxdb-mcp-server)
+[![LightNow](https://lightnow.ai/badge/io.github.idoru/influxdb-mcp-server)](https://lightnow.ai/servers/io.github.idoru/influxdb-mcp-server)
 
 [![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/idoru/influxdb-mcp-server)](https://archestra.ai/mcp-catalog/idoru__influxdb-mcp-server)
 
