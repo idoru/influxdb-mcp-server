@@ -61,7 +61,8 @@ The server requires these environment variables:
 
 - `INFLUXDB_TOKEN` (required): Authentication token for the InfluxDB API
 - `INFLUXDB_URL` (optional): URL of the InfluxDB instance (defaults to `http://localhost:8086`)
-- `INFLUXDB_ORG` (optional): Default organization name for certain operations
+- `INFLUXDB_ORG` (optional): Default organization name for certain operations. When set, `org` becomes optional on the `write-data` and `query-data` tools
+- `INFLUXDB_BUCKET` (optional): Default bucket name. When set, `bucket` becomes optional on the `write-data` tool
 
 ## Installation
 

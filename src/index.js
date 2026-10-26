@@ -46,6 +46,11 @@ if (options.http !== undefined && options.stdio) {
   process.exit(1);
 }
 
+// Params backed by an env default are optional; otherwise keep them required so
+// the advertised schema matches what the handler will actually accept
+const withEnvDefault = (schema, envDefault) =>
+  envDefault ? schema.optional() : schema;
+
 // Function to create and configure a new MCP server instance
 const createMcpServer = () => {
   const server = new McpServer({
@@ -76,18 +81,22 @@ const createMcpServer = () => {
     "write-data",
     `Stream newline-delimited line protocol records into a bucket. Use this after composing measurements so the LLM can insert real telemetry, optionally controlling timestamp precision.${DEFAULT_ORG ? ` Default org: "${DEFAULT_ORG}".` : ""}${DEFAULT_BUCKET ? ` Default bucket: "${DEFAULT_BUCKET}".` : ""}`,
     {
-      org: z
-        .string()
-        .optional()
-        .describe(
-          `Organization name that owns the destination bucket.${DEFAULT_ORG ? ` Defaults to "${DEFAULT_ORG}" if omitted.` : ""}`,
-        ),
-      bucket: z
-        .string()
-        .optional()
-        .describe(
-          `Bucket name to receive the points.${DEFAULT_BUCKET ? ` Defaults to "${DEFAULT_BUCKET}" if omitted.` : " Make sure it already exists or call create-bucket first."}`,
-        ),
+      org: withEnvDefault(
+        z
+          .string()
+          .describe(
+            `Human-readable organization name that owns the destination bucket (the same value returned by the orgs resource).${DEFAULT_ORG ? ` Defaults to "${DEFAULT_ORG}" if omitted.` : ""}`,
+          ),
+        DEFAULT_ORG,
+      ),
+      bucket: withEnvDefault(
+        z
+          .string()
+          .describe(
+            `Bucket name to receive the points.${DEFAULT_BUCKET ? ` Defaults to "${DEFAULT_BUCKET}" if omitted.` : " Make sure it already exists or call create-bucket first."}`,
+          ),
+        DEFAULT_BUCKET,
+      ),
       data: z
         .string()
         .describe(
@@ -106,12 +115,14 @@ const createMcpServer = () => {
     "query-data",
     `Execute a Flux query inside an organization to inspect measurement schemas, run aggregations, or validate recently written data.${DEFAULT_ORG ? ` Default org: "${DEFAULT_ORG}".` : ""}`,
     {
-      org: z
-        .string()
-        .optional()
-        .describe(
-          `Organization whose buckets the query should target.${DEFAULT_ORG ? ` Defaults to "${DEFAULT_ORG}" if omitted.` : ""}`,
-        ),
+      org: withEnvDefault(
+        z
+          .string()
+          .describe(
+            `Organization whose buckets the query should target (exact name, not ID).${DEFAULT_ORG ? ` Defaults to "${DEFAULT_ORG}" if omitted.` : ""}`,
+          ),
+        DEFAULT_ORG,
+      ),
       query: z
         .string()
         .describe(

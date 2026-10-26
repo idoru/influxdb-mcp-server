@@ -24,6 +24,7 @@
 - **Optional vars**: 
   - `INFLUXDB_URL` (defaults to http://localhost:8086)
   - `INFLUXDB_ORG` (organization name for queries)
+  - `INFLUXDB_BUCKET` (default bucket for write-data)
   - `DEBUG=mcp:*` (enables MCP protocol debugging)
 
 ## Project Structure
