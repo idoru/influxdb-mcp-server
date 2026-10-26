@@ -1977,7 +1977,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       async function testPrompt() {
         try {
           // Check the new file paths after refactoring
-          const serverFilePath = '${__dirname}/../src/index.js';
+          const serverFilePath = '${__dirname}/../src/server.js';
           const promptFilePath = '${__dirname}/../src/prompts/fluxQueryExamplesPrompt.js';
           
           // Check in the main file and the prompt file
@@ -2209,7 +2209,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       async function testPrompt() {
         try {
           // Check the new file paths after refactoring
-          const serverFilePath = '${__dirname}/../src/index.js';
+          const serverFilePath = '${__dirname}/../src/server.js';
           const promptFilePath = '${__dirname}/../src/prompts/lineProtocolGuidePrompt.js';
           
           // Check in the main file and the prompt file
