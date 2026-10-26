@@ -1,5 +1,5 @@
-import fetch from "node-fetch";
-import { INFLUXDB_TOKEN, INFLUXDB_URL, DEFAULT_ORG, DEFAULT_BUCKET } from "../config/env.js";
+import { influxRequest, WRITE_TIMEOUT_MS } from "../utils/influxClient.js";
+import { DEFAULT_ORG, DEFAULT_BUCKET } from "../config/env.js";
 
 // Tool: Write Data
 export async function writeData({ org: orgParam, bucket: bucketParam, data, precision }) {
@@ -18,42 +18,25 @@ export async function writeData({ org: orgParam, bucket: bucketParam, data, prec
       isError: true,
     };
   }
-  // Add extremely clear logging
-  console.log(`=== WRITE-DATA TOOL CALLED ===`);
-  console.log(
-    `Writing to org: ${org}, bucket: ${bucket}, data length: ${data.length}`,
-  );
+
+  console.log(`Writing to org: ${org}, bucket: ${bucket}, data length: ${data.length}`);
 
   try {
-    // Simplified approach focusing on core functionality
-    let endpoint = `/api/v2/write?org=${encodeURIComponent(org)}&bucket=${encodeURIComponent(bucket)
-      }`;
+    const params = new URLSearchParams({ org, bucket });
     if (precision) {
-      endpoint += `&precision=${precision}`;
+      params.set("precision", precision);
     }
 
-    console.log(`Write URL: ${INFLUXDB_URL}${endpoint}`);
-
-    // Use fetch directly instead of our wrapper to eliminate any potential issues
-    const response = await fetch(`${INFLUXDB_URL}${endpoint}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Authorization": `Token ${INFLUXDB_TOKEN}`,
+    await influxRequest(
+      `/api/v2/write?${params}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+        body: data,
       },
-      body: data,
-    });
+      WRITE_TIMEOUT_MS,
+    );
 
-    console.log(`Write response status: ${response.status}`);
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(
-        `Failed to write data: ${response.status} ${errorText}`,
-      );
-    }
-
-    console.log(`=== WRITE-DATA TOOL COMPLETED SUCCESSFULLY ===`);
     return {
       content: [{
         type: "text",
@@ -61,7 +44,7 @@ export async function writeData({ org: orgParam, bucket: bucketParam, data, prec
       }],
     };
   } catch (error) {
-    console.error(`=== WRITE-DATA TOOL ERROR: ${error.message} ===`);
+    console.error(`Write-data tool error: ${error.message}`);
     return {
       content: [{
         type: "text",

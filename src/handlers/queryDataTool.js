@@ -1,4 +1,4 @@
-import { influxRequest } from "../utils/influxClient.js";
+import { influxRequest, QUERY_TIMEOUT_MS } from "../utils/influxClient.js";
 import { DEFAULT_ORG } from "../config/env.js";
 
 // Tool: Query Data
@@ -19,6 +19,7 @@ export async function queryData({ org: orgParam, query }) {
         method: "POST",
         body: JSON.stringify({ query, type: "flux" }),
       },
+      QUERY_TIMEOUT_MS,
     );
 
     const responseText = await response.text();

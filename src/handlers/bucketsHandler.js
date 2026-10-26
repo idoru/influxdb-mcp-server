@@ -59,7 +59,6 @@ export async function listBuckets(uri) {
           error: `Error retrieving buckets: ${error.message}`,
         }),
       }],
-      error: true,
     };
   }
 }

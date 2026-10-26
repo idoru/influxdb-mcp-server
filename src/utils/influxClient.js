@@ -1,69 +1,70 @@
 import fetch from "node-fetch";
 import { INFLUXDB_TOKEN, INFLUXDB_URL } from "../config/env.js";
 
-// Helper function for InfluxDB API requests with timeout
-export async function influxRequest(endpoint, options = {}, timeoutMs = 5000) {
+export const DEFAULT_TIMEOUT_MS = 10000;
+export const WRITE_TIMEOUT_MS = 30000;
+export const QUERY_TIMEOUT_MS = 60000;
+
+// Helper for InfluxDB API requests. The timeout covers the whole exchange,
+// including reading the response body via text() or json(), not just the
+// arrival of response headers.
+export async function influxRequest(endpoint, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const url = `${INFLUXDB_URL}${endpoint}`;
-  const defaultOptions = {
-    headers: {
-      Authorization: `Token ${INFLUXDB_TOKEN}`,
-      "Content-Type": "application/json",
-    },
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const clear = () => clearTimeout(timeoutId);
+
+  // Report aborts as timeouts rather than node-fetch's generic AbortError
+  const describeError = (error) =>
+    controller.signal.aborted
+      ? new Error(`InfluxDB API request timed out after ${timeoutMs}ms`)
+      : error;
+
+  // Keep the timeout running until the body has been consumed
+  const readBody = async (read) => {
+    try {
+      return await read();
+    } catch (error) {
+      throw describeError(error);
+    } finally {
+      clear();
+    }
   };
 
-  console.log(`Making request to: ${url}`);
+  console.log(`Making ${options.method || "GET"} request to: ${url}`);
 
   try {
-    // Use AbortController for proper request cancellation
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => {
-      controller.abort(`InfluxDB API request timed out after ${timeoutMs}ms`);
-    }, timeoutMs);
-
-    // Properly merge headers to avoid conflicts
-    // This ensures custom headers (like Content-Type) aren't overridden
-    const mergedHeaders = {
-      ...defaultOptions.headers,
-      ...options.headers || {},
-    };
-
-    // Add the abort signal to the request options
-    const requestOptions = {
-      ...defaultOptions,
+    const response = await fetch(url, {
       ...options,
-      headers: mergedHeaders,
+      headers: {
+        Authorization: `Token ${INFLUXDB_TOKEN}`,
+        "Content-Type": "application/json",
+        ...options.headers,
+      },
       signal: controller.signal,
-    };
-
-    console.log(`Request options: ${JSON.stringify({
-      method: requestOptions.method,
-      headers: Object.keys(requestOptions.headers),
-    })
-      }`);
-
-    // Make the request
-    const response = await fetch(url, requestOptions);
-
-    // Clear the timeout since the request completed
-    clearTimeout(timeoutId);
+    });
 
     console.log(`Response status: ${response.status}`);
 
     if (!response.ok) {
-      const errorText = await Promise.race([
-        response.text(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Response text timeout")), 3000)
-        ),
-      ]);
+      const errorText = await readBody(() => response.text());
       throw new Error(`InfluxDB API Error (${response.status}): ${errorText}`);
+    }
+
+    if (response.status === 204 || !response.body) {
+      clear();
+    } else {
+      const text = response.text.bind(response);
+      const json = response.json.bind(response);
+      response.text = () => readBody(text);
+      response.json = () => readBody(json);
     }
 
     return response;
   } catch (error) {
-    // Log the error with more details
-    console.error(`Error in influxRequest to ${url}:`, error.message);
-    // Rethrow to be handled by the caller
-    throw error;
+    clear();
+    const reported = describeError(error);
+    console.error(`Error in influxRequest to ${url}:`, reported.message);
+    throw reported;
   }
 }
