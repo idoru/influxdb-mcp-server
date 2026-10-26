@@ -38,9 +38,11 @@ The server provides these tools:
 
 1. `write-data`: Write time-series data in line protocol format
    - Parameters: org, bucket, data, precision (optional)
+   - `org` and `bucket` are optional when `INFLUXDB_ORG` / `INFLUXDB_BUCKET` are set, and fall back to those values
 
 2. `query-data`: Execute Flux queries
    - Parameters: org, query
+   - `org` is optional when `INFLUXDB_ORG` is set, and falls back to that value
 
 3. `create-bucket`: Create a new bucket
    - Parameters: name, orgID, retentionPeriodSeconds (optional)
@@ -139,7 +141,8 @@ Add the server to your `claude_desktop_config.json`:
       "env": {
         "INFLUXDB_TOKEN": "your_token",
         "INFLUXDB_URL": "http://localhost:8086",
-        "INFLUXDB_ORG": "your_org"
+        "INFLUXDB_ORG": "your_org",
+        "INFLUXDB_BUCKET": "your_bucket"
       }
     }
   }
@@ -157,7 +160,8 @@ Add the server to your `claude_desktop_config.json`:
       "env": {
         "INFLUXDB_TOKEN": "your_token",
         "INFLUXDB_URL": "http://localhost:8086",
-        "INFLUXDB_ORG": "your_org"
+        "INFLUXDB_ORG": "your_org",
+        "INFLUXDB_BUCKET": "your_bucket"
       }
     }
   }

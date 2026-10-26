@@ -18,11 +18,15 @@ startCommand:
       influxdbOrg:
         type: string
         description: Default organization name for operations
+      influxdbBucket:
+        type: string
+        description: Default bucket name for write-data
   commandFunction:
     # A JS function that produces the CLI command based on the given config to start the MCP on stdio.
     |-
-    (config) => ({ command: 'node', args: ['src/index.js'], env: { INFLUXDB_TOKEN: config.influxdbToken, INFLUXDB_URL: config.influxdbUrl, INFLUXDB_ORG: config.influxdbOrg } })
+    (config) => ({ command: 'node', args: ['src/index.js'], env: { INFLUXDB_TOKEN: config.influxdbToken, INFLUXDB_URL: config.influxdbUrl, INFLUXDB_ORG: config.influxdbOrg, INFLUXDB_BUCKET: config.influxdbBucket } })
   exampleConfig:
     influxdbToken: example-token
     influxdbUrl: http://localhost:8086
     influxdbOrg: example_org
+    influxdbBucket: example_bucket
