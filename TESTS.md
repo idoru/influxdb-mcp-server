@@ -90,6 +90,11 @@ The project now uses multiple testing approaches to ensure functionality and sta
    - Validates that the individual handlers work correctly with InfluxDB
    - Uses environment variable mocking to ensure proper test isolation
 
+3. **Tool Schema Tests** (`tests/tool-schema.test.js`):
+   - Spawns the server over stdio with different `INFLUXDB_ORG` / `INFLUXDB_BUCKET` settings and inspects the advertised tool schemas
+   - Verifies `org`/`bucket` are only optional when a matching env default is configured
+   - Does not require Docker or a running InfluxDB instance
+
 ### Direct Testing Advantages
 
 The direct API testing approach focuses on verifying the core functionality without depending on the MCP client. This approach has several advantages:
