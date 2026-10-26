@@ -4,7 +4,7 @@ This directory contains a comprehensive integration test suite for the InfluxDB 
 
 ## Prerequisites
 
-- Node.js 16 or higher
+- Node.js 20 or higher
 - Docker (for running InfluxDB during tests)
 - npm or yarn
 
@@ -42,6 +42,13 @@ The test suite:
    - Testing write-data operations
    - Testing Flux queries
    - Verifying prompt content and validity
+
+Two suites run without Docker:
+
+- `tests/hardening.test.js` covers the Flux CSV parser, Flux string escaping, URI parameter decoding, HTTP configuration validation, and the query/measurements resources against a mocked InfluxDB client
+- `tests/http-transport.test.js` runs the Streamable HTTP app in-process and checks Host header validation (DNS rebinding), bearer authentication, body limits, JSON-RPC error responses, concurrent stateless requests, and CLI startup/refusal behaviour
+
+Run them alone with `npm test -- tests/hardening.test.js tests/http-transport.test.js`.
 
 ## Test Environment
 
