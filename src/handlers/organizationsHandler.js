@@ -59,7 +59,6 @@ export async function listOrganizations(uri) {
           error: `Error retrieving organizations: ${error.message}`,
         }),
       }],
-      error: true,
     };
   }
 }

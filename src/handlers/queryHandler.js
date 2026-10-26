@@ -1,86 +1,43 @@
-import fetch from "node-fetch";
-import { INFLUXDB_TOKEN, INFLUXDB_URL } from "../config/env.js";
+import { influxRequest, QUERY_TIMEOUT_MS } from "../utils/influxClient.js";
+import { parseFluxCsv } from "../utils/csv.js";
+import { decodeUriParam } from "../utils/flux.js";
 
 // Resource: Query data as a resource
-export async function executeQuery(uri, { orgName, fluxQuery }) {
-  console.log(`=== QUERY RESOURCE CALLED ===`);
-  console.log(`Query for org: ${orgName}, query length: ${fluxQuery.length}`);
-
+export async function executeQuery(uri, { orgName: rawOrgName, fluxQuery }) {
   try {
-    const decodedQuery = decodeURIComponent(fluxQuery);
-    console.log(`Decoded query: ${decodedQuery.substring(0, 50)}...`);
+    const orgName = decodeUriParam("orgName", rawOrgName);
+    const decodedQuery = decodeUriParam("fluxQuery", fluxQuery);
+    console.log(`Query resource for org: ${orgName}, query length: ${decodedQuery.length}`);
 
-    // Direct fetch approach
-    const queryUrl = `${INFLUXDB_URL}/api/v2/query?org=${encodeURIComponent(orgName)
-      }`;
-    console.log(`Query URL: ${queryUrl}`);
-
-    const response = await fetch(queryUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Token ${INFLUXDB_TOKEN}`,
+    const response = await influxRequest(
+      `/api/v2/query?org=${encodeURIComponent(orgName)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ query: decodedQuery, type: "flux" }),
       },
-      body: JSON.stringify({ query: decodedQuery, type: "flux" }),
-    });
-
-    console.log(`Query response status: ${response.status}`);
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(
-        `Failed to execute query: ${response.status} ${errorText}`,
-      );
-    }
+      QUERY_TIMEOUT_MS,
+    );
 
     const responseText = await response.text();
-    console.log(`Query response length: ${responseText.length}`);
+    const tables = parseFluxCsv(responseText);
 
-    console.log(`=== QUERY RESOURCE COMPLETED SUCCESSFULLY ===`);
+    // Tables can have different columns; report the union in first-seen order
+    const headers = [...new Set(tables.flatMap((table) => table.headers))];
+    const data = tables.flatMap((table) => table.records);
 
-    // Parse CSV to JSON
-    const lines = responseText.split("\n").filter((line) => line.trim() !== "");
-    let result;
-
-    if (lines.length > 1) {
-      const headers = lines[0].split(",");
-      const data = lines.slice(1).map((line) => {
-        const values = line.split(",");
-        const record = {};
-        headers.forEach((header, index) => {
-          record[header] = values[index];
-        });
-        return record;
-      });
-
-      result = {
-        contents: [{
-          uri: uri.href,
-          text: JSON.stringify({
-            query: decodedQuery,
-            organization: orgName,
-            headers: headers,
-            data: data,
-          }),
-        }],
-      };
-    } else {
-      // No results or headers only
-      result = {
-        contents: [{
-          uri: uri.href,
-          text: JSON.stringify({
-            query: decodedQuery,
-            organization: orgName,
-            data: [],
-          }),
-        }],
-      };
-    }
-
-    return result;
+    return {
+      contents: [{
+        uri: uri.href,
+        text: JSON.stringify({
+          query: decodedQuery,
+          organization: orgName,
+          ...(data.length > 0 ? { headers } : {}),
+          data,
+        }),
+      }],
+    };
   } catch (error) {
-    console.error(`=== QUERY RESOURCE ERROR: ${error.message} ===`);
+    console.error(`Error in query resource: ${error.message}`);
     return {
       contents: [{
         uri: uri.href,
@@ -88,7 +45,6 @@ export async function executeQuery(uri, { orgName, fluxQuery }) {
           error: `Error executing query: ${error.message}`,
         }),
       }],
-      error: true,
     };
   }
 }

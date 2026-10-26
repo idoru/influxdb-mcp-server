@@ -11,6 +11,9 @@ describe("CSV Parsing Edge Cases - Issue #8", () => {
     // Mock the influxClient module before importing the handler
     jest.unstable_mockModule("../src/utils/influxClient.js", () => ({
       influxRequest: jest.fn(),
+      DEFAULT_TIMEOUT_MS: 10000,
+      WRITE_TIMEOUT_MS: 30000,
+      QUERY_TIMEOUT_MS: 60000,
     }));
 
     // Mock the env module
