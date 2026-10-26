@@ -23,7 +23,7 @@
   "description": "A Model Context Protocol (MCP) server for InfluxDB that enables Claude and other AI assistants to work with time-series data",
   "repository": {
     "type": "git",
-    "url": "https://github.com/idoru/influxdb-mcp-server.git"
+    "url": "git+https://github.com/idoru/influxdb-mcp-server.git"
   },
   "bugs": {
     "url": "https://github.com/idoru/influxdb-mcp-server/issues"
