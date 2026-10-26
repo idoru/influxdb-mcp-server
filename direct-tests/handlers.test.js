@@ -93,6 +93,7 @@ describe("InfluxDB MCP Server Direct Handler Tests", () => {
       INFLUXDB_URL: `http://localhost:${INFLUXDB_PORT}`,
       INFLUXDB_TOKEN: INFLUXDB_ADMIN_TOKEN,
       DEFAULT_ORG: INFLUXDB_ORG,
+      DEFAULT_BUCKET: INFLUXDB_BUCKET,
       validateEnvironment: () => {
         console.log("Mock validateEnvironment called with overridden env vars");
       },
