@@ -6,21 +6,31 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
 
+    strategy:
+      matrix:
+        node-version: [ '20', '22', '24' ]
+
     steps:
-    - uses: actions/checkout@v3
-    
+    - uses: actions/checkout@v4
+
     - name: Set up Node.js
-      uses: actions/setup-node@v3
+      uses: actions/setup-node@v4
       with:
-        node-version: '16'
+        node-version: ${{ matrix.node-version }}
         cache: 'npm'
-    
+
     - name: Install dependencies
-      run: npm install
-    
-    - name: Run integration tests
+      run: npm ci
+
+    - name: Audit production dependencies
+      run: npm audit --omit=dev --audit-level=moderate
+
+    - name: Run tests
       run: npm test

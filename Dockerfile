@@ -4,16 +4,16 @@ FROM node:lts-alpine
 
 WORKDIR /app
 
-# Install dependencies
+# Install production dependencies only
 COPY package*.json ./
-RUN npm ci --production
+RUN npm ci --omit=dev && npm cache clean --force
 
 # Copy source code
 COPY src ./src
 
-# Use lightweight non-root user (optional)
-# RUN addgroup -S appgroup && adduser -S appuser -G appgroup
-# USER appuser
+# Run as the unprivileged user provided by the base image
+USER node
 
-# Entrypoint for MCP server (using stdio transport)
+# Entrypoint for MCP server (using stdio transport). For HTTP inside a
+# container, pass e.g. `--http 3000 --host 0.0.0.0` and set MCP_AUTH_TOKEN.
 ENTRYPOINT ["node", "src/index.js"]
