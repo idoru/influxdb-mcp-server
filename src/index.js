@@ -55,7 +55,7 @@ const withEnvDefault = (schema, envDefault) =>
 const createMcpServer = () => {
   const server = new McpServer({
     name: "InfluxDB",
-    version: "0.1.1",
+    version: "0.3.0",
   });
 
   // Register resources
