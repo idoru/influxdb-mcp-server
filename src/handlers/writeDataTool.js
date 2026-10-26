@@ -27,7 +27,7 @@ export async function writeData({ org: orgParam, bucket: bucketParam, data, prec
       params.set("precision", precision);
     }
 
-    await influxRequest(
+    const response = await influxRequest(
       `/api/v2/write?${params}`,
       {
         method: "POST",
@@ -36,6 +36,9 @@ export async function writeData({ org: orgParam, bucket: bucketParam, data, prec
       },
       WRITE_TIMEOUT_MS,
     );
+    // InfluxDB OSS answers 204, but proxies or Cloud may include a body;
+    // consume it so the request timer is released
+    await response.text();
 
     return {
       content: [{

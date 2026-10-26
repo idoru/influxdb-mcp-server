@@ -96,10 +96,20 @@ describe("HTTP transport hardening", () => {
       expect(rpc.result.serverInfo).toEqual({ name: "InfluxDB", version });
     });
 
-    test("rejects a rebound Host header before reading the body", async () => {
+    test("rejects a rebound Host header", async () => {
       const res = await request(port, { body: INITIALIZE, headers: { Host: `attacker.example:${port}` } });
       expect(res.status).toBe(403);
       expect(JSON.parse(res.text).error.message).toContain("Invalid Host");
+    });
+
+    test("checks the Host header before parsing the body", async () => {
+      const res = await request(port, { body: "{not json", headers: { Host: `attacker.example:${port}` } });
+      expect(res.status).toBe(403);
+    });
+
+    test("accepts the IPv6 loopback Host", async () => {
+      const res = await request(port, { body: INITIALIZE, headers: { Host: `[::1]:${port}` } });
+      expect(res.status).toBe(200);
     });
   });
 
@@ -114,6 +124,21 @@ describe("HTTP transport hardening", () => {
       const res = await request(port, { body: INITIALIZE });
       expect(res.status).toBe(401);
       expect(res.headers["www-authenticate"]).toContain("Bearer");
+    });
+
+    test("checks the token before parsing the body", async () => {
+      const res = await request(port, { body: "{not json" });
+      expect(res.status).toBe(401);
+    });
+
+    test("rejects non-Bearer schemes", async () => {
+      const res = await request(port, { body: INITIALIZE, headers: { Authorization: "Basic s3cret-token" } });
+      expect(res.status).toBe(401);
+    });
+
+    test("requires the token for GET as well", async () => {
+      const res = await request(port, { method: "GET" });
+      expect(res.status).toBe(401);
     });
 
     test("rejects requests with the wrong token", async () => {

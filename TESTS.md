@@ -43,12 +43,13 @@ The test suite:
    - Testing Flux queries
    - Verifying prompt content and validity
 
-Two suites run without Docker:
+Three suites run without Docker:
 
 - `tests/hardening.test.js` covers the Flux CSV parser, Flux string escaping, URI parameter decoding, HTTP configuration validation, and the query/measurements resources against a mocked InfluxDB client
+- `tests/influx-client.test.js` checks InfluxDB request timeouts (stalled headers and stalled bodies) against a local misbehaving HTTP server
 - `tests/http-transport.test.js` runs the Streamable HTTP app in-process and checks Host header validation (DNS rebinding), bearer authentication, body limits, JSON-RPC error responses, concurrent stateless requests, and CLI startup/refusal behaviour
 
-Run them alone with `npm test -- tests/hardening.test.js tests/http-transport.test.js`.
+Run them alone with `npm test -- tests/hardening.test.js tests/http-transport.test.js tests/influx-client.test.js`.
 
 ## Test Environment
 

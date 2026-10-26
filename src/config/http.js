@@ -30,9 +30,11 @@ function parseBodyLimit(value) {
   return limit;
 }
 
-// Host header validation compares against URL.hostname, which keeps IPv6
-// addresses in brackets
-const toHostname = (host) => (host.includes(":") && !host.startsWith("[") ? `[${host}]` : host);
+// Host header validation compares URL.hostname (no port, IPv6 in brackets)
+function toHostname(host) {
+  const withoutPort = host.replace(/^([^:[\]]+):\d+$/, "$1").replace(/^(\[[^\]]+\]):\d+$/, "$1");
+  return withoutPort.includes(":") && !withoutPort.startsWith("[") ? `[${withoutPort}]` : withoutPort;
+}
 
 const parseList = (value) =>
   (value || "")
@@ -45,6 +47,9 @@ export function resolveHttpConfig(options = {}, env = process.env) {
   // listen() expects IPv6 addresses without brackets
   const host = (options.host || env.MCP_HTTP_HOST || DEFAULT_HTTP_HOST).trim().replace(/^\[(.*)\]$/, "$1");
   const authToken = env.MCP_AUTH_TOKEN?.trim() || undefined;
+  if (authToken && /\s/.test(authToken)) {
+    throw new Error("MCP_AUTH_TOKEN must not contain whitespace.");
+  }
   const allowUnauthenticated = env.MCP_HTTP_ALLOW_UNAUTHENTICATED === "true";
   const bodyLimit = parseBodyLimit(env.MCP_HTTP_BODY_LIMIT);
   const loopback = isLoopbackHost(host);

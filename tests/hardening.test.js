@@ -92,6 +92,11 @@ describe("Hardening: helpers and resource handlers", () => {
     test("escapes quotes, backslashes and interpolation", () => {
       expect(fluxString('a"b\\c${d}')).toBe('"a\\"b\\\\c\\${d}"');
     });
+
+    test("escapes backslashes before interpolation markers", () => {
+      expect(fluxString("\\${x}")).toBe('"\\\\\\${x}"');
+      expect(fluxString("cost $5")).toBe('"cost $5"');
+    });
   });
 
   describe("decodeUriParam", () => {
@@ -152,6 +157,19 @@ describe("Hardening: helpers and resource handlers", () => {
       );
       expect(config.host).toBe("::1");
       expect(config.allowedHosts).toEqual(["mcp.example.com", "[::1]"]);
+    });
+
+    test("strips ports from MCP_ALLOWED_HOSTS entries", () => {
+      const config = resolveHttpConfig({ http: true }, { MCP_ALLOWED_HOSTS: "mcp.example.com:3000,[::1]:3000" });
+      expect(config.allowedHosts).toEqual(["mcp.example.com", "[::1]"]);
+    });
+
+    test("treats 127.x.x.x as loopback", () => {
+      expect(resolveHttpConfig({ http: true, host: "127.0.0.2" }, {}).allowedHosts).not.toBeNull();
+    });
+
+    test("rejects auth tokens containing whitespace", () => {
+      expect(() => resolveHttpConfig({ http: true }, { MCP_AUTH_TOKEN: "two words" })).toThrow("whitespace");
     });
 
     test("rejects body limits body-parser would silently ignore", () => {
