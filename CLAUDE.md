@@ -25,11 +25,21 @@
   - `INFLUXDB_URL` (defaults to http://localhost:8086)
   - `INFLUXDB_ORG` (organization name for queries)
   - `INFLUXDB_BUCKET` (default bucket for write-data)
-  - `DEBUG=mcp:*` (enables MCP protocol debugging)
+  - `DEBUG=mcp:*` (enables MCP protocol debugging; logs full messages including data)
+- **HTTP transport vars** (`--http` only):
+  - `MCP_HTTP_HOST` (bind interface, defaults to 127.0.0.1; same as `--host`)
+  - `MCP_AUTH_TOKEN` (require `Authorization: Bearer`; mandatory for non-loopback hosts)
+  - `MCP_ALLOWED_HOSTS` (comma-separated Host header allowlist)
+  - `MCP_HTTP_ALLOW_UNAUTHENTICATED=true` (opt out of the auth requirement off loopback)
+  - `MCP_HTTP_BODY_LIMIT` (defaults to 4mb)
 
 ## Project Structure
-- `src/` - Core server implementation
-- `tests/` - Integration tests using Docker containers
+- `src/index.js` - CLI entry point; `src/server.js` - MCP server factory
+- `src/http/app.js` - Express app for Streamable HTTP (Host validation, auth, limits)
+- `src/config/` - `env.js` (InfluxDB env) and `http.js` (HTTP transport options)
+- `src/utils/` - InfluxDB client, Flux CSV parser, Flux escaping, logging
+- `tests/` - Integration tests using Docker containers, plus Docker-free unit/HTTP tests
+- `direct-tests/` - Handler tests against a Dockerized InfluxDB
 
 ## Testing Approach
 - Integration tests use Docker to spin up a real InfluxDB instance
@@ -37,6 +47,8 @@
 - Server process is tested through direct spawning and API verification
 - All tests include proper cleanup of Docker containers
 - Test timeout is set to 60 seconds to accommodate Docker operations
+- Tests mock `src/config/env.js` and `src/utils/influxClient.js` with explicit export lists; update those mocks when adding exports that handlers import
+- Interpolate user values into Flux only via `fluxString()`, and route InfluxDB calls through `influxRequest()` so timeouts apply
 
 ## Common Issues
 - Docker needs to be running for tests to pass
