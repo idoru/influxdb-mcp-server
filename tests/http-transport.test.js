@@ -62,6 +62,7 @@ function parseRpc(text) {
 describe("HTTP transport hardening", () => {
   let createHttpApp;
   let createMcpServer;
+  let resolveHttpConfig;
   const servers = [];
 
   async function listen(config) {
@@ -76,6 +77,7 @@ describe("HTTP transport hardening", () => {
   beforeAll(async () => {
     ({ createHttpApp } = await import("../src/http/app.js"));
     ({ createMcpServer } = await import("../src/server.js"));
+    ({ resolveHttpConfig } = await import("../src/config/http.js"));
   });
 
   afterAll(async () => {
@@ -105,6 +107,15 @@ describe("HTTP transport hardening", () => {
     test("checks the Host header before parsing the body", async () => {
       const res = await request(port, { body: "{not json", headers: { Host: `attacker.example:${port}` } });
       expect(res.status).toBe(403);
+    });
+
+    test("accepts the configured loopback address as Host by default", async () => {
+      // Listen on 127.0.0.1 (other 127/8 addresses may not be configured on the
+      // test machine) but resolve the allowlist as if --host 127.0.0.2 was given
+      const { allowedHosts } = resolveHttpConfig({ http: true, host: "127.0.0.2" }, {});
+      const altPort = await listen({ allowedHosts });
+      const res = await request(altPort, { body: INITIALIZE, headers: { Host: `127.0.0.2:${altPort}` } });
+      expect(res.status).toBe(200);
     });
 
     test("accepts the IPv6 loopback Host", async () => {

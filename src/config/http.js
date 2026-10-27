@@ -66,7 +66,10 @@ export function resolveHttpConfig(options = {}, env = process.env) {
   // default; servers on other interfaces rely on MCP_ALLOWED_HOSTS and/or auth.
   let allowedHosts = parseList(env.MCP_ALLOWED_HOSTS);
   if (allowedHosts.length === 0) {
-    allowedHosts = loopback ? ["localhost", "127.0.0.1", "[::1]"] : null;
+    // Include the bind address itself so e.g. --host 127.0.0.2 accepts its own Host
+    allowedHosts = loopback
+      ? [...new Set(["localhost", "127.0.0.1", "[::1]", toHostname(host.toLowerCase())])]
+      : null;
   }
 
   return { port, host, authToken, allowUnauthenticated, allowedHosts, bodyLimit };

@@ -165,7 +165,12 @@ describe("Hardening: helpers and resource handlers", () => {
     });
 
     test("treats 127.x.x.x as loopback", () => {
-      expect(resolveHttpConfig({ http: true, host: "127.0.0.2" }, {}).allowedHosts).not.toBeNull();
+      expect(resolveHttpConfig({ http: true, host: "127.0.0.2" }, {}).allowedHosts).toEqual(
+        ["localhost", "127.0.0.1", "[::1]", "127.0.0.2"],
+      );
+      expect(resolveHttpConfig({ http: true, host: "::1" }, {}).allowedHosts).toEqual(
+        ["localhost", "127.0.0.1", "[::1]"],
+      );
     });
 
     test("rejects auth tokens containing whitespace", () => {

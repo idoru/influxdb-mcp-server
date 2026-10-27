@@ -73,7 +73,7 @@ The following variables apply only to the Streamable HTTP transport (see [HTTP t
 
 - `MCP_HTTP_HOST` (optional): Interface to listen on (defaults to `127.0.0.1`; same as `--host`)
 - `MCP_AUTH_TOKEN` (optional): When set, every request must send `Authorization: Bearer <token>`. Required to listen on a non-loopback interface
-- `MCP_ALLOWED_HOSTS` (optional): Comma-separated hostnames (ports are ignored) accepted in the `Host` header. Defaults to `localhost,127.0.0.1,[::1]` on loopback; unset means no `Host` check on other interfaces
+- `MCP_ALLOWED_HOSTS` (optional): Comma-separated hostnames (ports are ignored) accepted in the `Host` header. Defaults to `localhost,127.0.0.1,[::1]` plus the bind address on loopback; unset means no `Host` check on other interfaces
 - `MCP_HTTP_ALLOW_UNAUTHENTICATED` (optional): Set to `true` to listen on a non-loopback interface without `MCP_AUTH_TOKEN`, e.g. behind a reverse proxy that authenticates for you
 - `MCP_HTTP_BODY_LIMIT` (optional): Maximum request body size (defaults to `4mb`; accepts `b`, `kb` or `mb` suffixes). Raise it for very large `write-data` batches
 
