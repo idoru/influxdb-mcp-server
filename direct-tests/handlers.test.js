@@ -758,4 +758,3 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
     console.log(`Organization '${newOrgName}' created successfully`);
   });
 });
-

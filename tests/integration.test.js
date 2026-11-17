@@ -843,8 +843,8 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            query: `from(bucket: "${INFLUXDB_BUCKET}") 
-              |> range(start: -1h) 
+            query: `from(bucket: "${INFLUXDB_BUCKET}")
+              |> range(start: -1h)
               |> filter(fn: (r) => r._measurement == "cpu_usage")
               |> limit(n: 1)`,
             type: "flux",
@@ -1202,7 +1202,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
       // Create the Flux query to list measurements
       const queryBody = JSON.stringify({
         query: `import "influxdata/influxdb/schema"
-          
+
 schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
         type: "flux",
       });
@@ -1316,7 +1316,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       // Create the Flux query to list measurements
       const queryBody = JSON.stringify({
         query: `import "influxdata/influxdb/schema"
-          
+
 schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
         type: "flux",
       });
@@ -1923,8 +1923,8 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       await writeSampleData();
 
       // Create a Flux query to fetch cpu_usage data
-      const fluxQuery = `from(bucket: "${INFLUXDB_BUCKET}") 
-        |> range(start: -1h) 
+      const fluxQuery = `from(bucket: "${INFLUXDB_BUCKET}")
+        |> range(start: -1h)
         |> filter(fn: (r) => r._measurement == "cpu_usage")
         |> limit(n: 10)`;
 
@@ -1973,33 +1973,33 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       // We'll use child_process to run a script that imports and tests the prompt
       const testScript = `
       import { promises as fs } from 'fs';
-      
+
       async function testPrompt() {
         try {
           // Check the new file paths after refactoring
           const serverFilePath = '${__dirname}/../src/server.js';
           const promptFilePath = '${__dirname}/../src/prompts/fluxQueryExamplesPrompt.js';
-          
+
           // Check in the main file and the prompt file
           const indexContent = await fs.readFile(serverFilePath, 'utf8');
           const promptContent = await fs.readFile(promptFilePath, 'utf8');
-          
+
           // Check if the server has flux-query-examples prompt defined
-          const hasFluxPrompt = indexContent.includes('flux-query-examples') && 
+          const hasFluxPrompt = indexContent.includes('flux-query-examples') &&
                                 indexContent.includes('fluxQueryExamplesPrompt');
-          
+
           // Check if the prompt file has example content
-          const hasExampleContent = promptContent.includes('Example Flux queries') || 
-                                   promptContent.includes('from(bucket:') || 
+          const hasExampleContent = promptContent.includes('Example Flux queries') ||
+                                   promptContent.includes('from(bucket:') ||
                                    promptContent.includes('range(start:');
-          
+
           console.log(JSON.stringify({ hasFluxPrompt, hasExampleContent }));
         } catch (error) {
           console.error('Error:', error.message);
           process.exit(1);
         }
       }
-      
+
       testPrompt();
       `;
 
@@ -2205,33 +2205,33 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       // We'll use child_process to run a script that imports and tests the prompt
       const testScript = `
       import { promises as fs } from 'fs';
-      
+
       async function testPrompt() {
         try {
           // Check the new file paths after refactoring
           const serverFilePath = '${__dirname}/../src/server.js';
           const promptFilePath = '${__dirname}/../src/prompts/lineProtocolGuidePrompt.js';
-          
+
           // Check in the main file and the prompt file
           const indexContent = await fs.readFile(serverFilePath, 'utf8');
           const promptContent = await fs.readFile(promptFilePath, 'utf8');
-          
+
           // Check if the server has line-protocol-guide prompt defined
-          const hasPrompt = indexContent.includes('line-protocol-guide') && 
+          const hasPrompt = indexContent.includes('line-protocol-guide') &&
                             indexContent.includes('lineProtocolGuidePrompt');
-          
+
           // Check if the prompt file has example content
-          const hasContent = promptContent.includes('Line Protocol Guide') || 
-                           promptContent.includes('measurement,tag-key=tag-value') || 
+          const hasContent = promptContent.includes('Line Protocol Guide') ||
+                           promptContent.includes('measurement,tag-key=tag-value') ||
                            promptContent.includes('Components:');
-          
+
           console.log(JSON.stringify({ hasPrompt, hasContent }));
         } catch (error) {
           console.error('Error:', error.message);
           process.exit(1);
         }
       }
-      
+
       testPrompt();
       `;
 
