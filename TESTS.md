@@ -171,7 +171,7 @@ During development, we encountered several challenges with testing the MCP serve
   - When MCP client is needed:
     - Check authorization tokens are correct and have sufficient permissions
     - Add proper error handling with detailed logging
-    - Implement connection validation and reconnection logic 
+    - Implement connection validation and reconnection logic
     - Add appropriate timeout handling using AbortController
     - Consider opening an issue with the MCP SDK if problems persist
 
