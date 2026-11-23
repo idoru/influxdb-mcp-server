@@ -13,10 +13,30 @@ function parseFlag(name, value) {
   return false;
 }
 
+function parsePositiveInteger(name, value, fallback) {
+  if (value === undefined || value.trim() === "") return fallback;
+  const number = /^\d+$/.test(value.trim()) ? Number(value.trim()) : NaN;
+  if (!Number.isSafeInteger(number) || number < 1) {
+    configErrors.push(`${name} must be a positive integer`);
+    return fallback;
+  }
+  return number;
+}
+
+export const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+
 export const INFLUXDB_URL = process.env.INFLUXDB_URL || "http://localhost:8086";
 export const INFLUXDB_TOKEN = process.env.INFLUXDB_TOKEN;
 export const DEFAULT_ORG = process.env.INFLUXDB_ORG;
 export const DEFAULT_BUCKET = process.env.INFLUXDB_BUCKET;
+
+// Largest InfluxDB response body the server will buffer, so one large query
+// cannot exhaust memory
+export const MAX_RESPONSE_BYTES = parsePositiveInteger(
+  "INFLUXDB_MAX_RESPONSE_BYTES",
+  process.env.INFLUXDB_MAX_RESPONSE_BYTES,
+  DEFAULT_MAX_RESPONSE_BYTES,
+);
 
 // Omit the write and admin tools (write-data, create-bucket, create-org).
 // The InfluxDB token's permissions are what actually enforce read-only access.

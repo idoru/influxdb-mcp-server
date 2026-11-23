@@ -21,6 +21,7 @@ describe("CSV Parsing Edge Cases - Issue #8", () => {
       INFLUXDB_URL: "http://localhost:8086",
       INFLUXDB_TOKEN: "test-token",
       DEFAULT_ORG: "test-org",
+      MAX_RESPONSE_BYTES: 10 * 1024 * 1024,
       READ_ONLY: false,
       ENABLE_QUERY_RESOURCE: false,
       validateEnvironment: () => {},
