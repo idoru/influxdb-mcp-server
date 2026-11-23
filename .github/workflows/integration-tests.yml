@@ -17,6 +17,27 @@ jobs:
       matrix:
         node-version: [ '22', '24', '26' ]
 
+    # Throwaway InfluxDB for the integration suites; the tests only get its
+    # URL and token and never talk to Docker. The credentials are per run and
+    # not secret: the runner accepts no inbound connections.
+    services:
+      influxdb:
+        image: influxdb:2.7@sha256:b8d940ca9376f85118260f5b6bd236b8a00b1749c3350c5578d4cde8e27f31f2
+        ports:
+          - 127.0.0.1:8086:8086
+        env:
+          DOCKER_INFLUXDB_INIT_MODE: setup
+          DOCKER_INFLUXDB_INIT_USERNAME: ci-admin
+          DOCKER_INFLUXDB_INIT_PASSWORD: ci-${{ github.run_id }}-${{ github.run_attempt }}-password
+          DOCKER_INFLUXDB_INIT_ORG: test-org
+          DOCKER_INFLUXDB_INIT_BUCKET: test-bucket
+          DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ci-${{ github.run_id }}-${{ github.run_attempt }}-token
+        options: >-
+          --health-cmd "influx ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
@@ -29,7 +50,7 @@ jobs:
         cache: 'npm'
 
     - name: Install dependencies
-      run: npm ci
+      run: npm ci --ignore-scripts
 
     - name: Verify registry signatures
       run: npm audit signatures
@@ -37,5 +58,13 @@ jobs:
     - name: Audit production dependencies
       run: npm audit --omit=dev --audit-level=moderate
 
-    - name: Run tests
+    - name: Run unit and HTTP transport tests
       run: npm test
+
+    - name: Run integration tests
+      run: npm run test:integration
+      env:
+        INFLUXDB_TEST_URL: http://127.0.0.1:8086
+        INFLUXDB_TEST_ADMIN_TOKEN: ci-${{ github.run_id }}-${{ github.run_attempt }}-token
+        INFLUXDB_TEST_ORG: test-org
+        REQUIRE_INFLUX_TESTS: "1"

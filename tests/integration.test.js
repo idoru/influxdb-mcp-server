@@ -1,105 +1,59 @@
 import { jest } from "@jest/globals";
 import { spawn } from "child_process";
-import Docker from "dockerode";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import * as path from "path";
-import * as fs from "fs";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
 import waitForExpect from "wait-for-expect";
+import {
+  createRunBucket,
+  deleteRunResources,
+  describeInflux,
+  influx,
+  uniqueName,
+  waitForInfluxDBReady,
+} from "./support/influx.js";
+import { fluxQueryExamplesPrompt } from "../src/prompts/fluxQueryExamplesPrompt.js";
+import { lineProtocolGuidePrompt } from "../src/prompts/lineProtocolGuidePrompt.js";
 
 // Get __dirname equivalent for ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Generate a random port between 10000 and 20000 to avoid conflicts
-const getRandomPort = () => Math.floor(Math.random() * 10000) + 10000;
+// The InfluxDB instance comes from INFLUXDB_TEST_* (see tests/support/influx.js)
+const INFLUXDB_URL = influx.url;
+const INFLUXDB_ADMIN_TOKEN = influx.adminToken;
+const INFLUXDB_ORG = influx.org;
+// Each run writes to its own bucket, created in beforeAll and deleted in afterAll
+const INFLUXDB_BUCKET = uniqueName("integration");
 
-// Configuration for tests
-const INFLUXDB_PORT = getRandomPort(); // Use dynamic port to avoid conflicts
-console.log(`Using InfluxDB port: ${INFLUXDB_PORT}`);
-const INFLUXDB_ADMIN_TOKEN = "admintoken123"; // This would be used for initial setup
-const INFLUXDB_TOKEN = "testtoken123"; // This will be created and used by our MCP server
-const INFLUXDB_ORG = "test-org";
-const INFLUXDB_BUCKET = "test-bucket";
-const INFLUXDB_USERNAME = "admin";
-const INFLUXDB_PASSWORD = "adminpassword";
-
-// Increased test timeout for Docker operations
-jest.setTimeout(60000); // 60 seconds for Docker operations
+jest.setTimeout(60000);
 
 // This test suite focuses only on direct InfluxDB API testing without using MCP
 // This approach isolates the InfluxDB functionality from MCP client connectivity issues
-describe("InfluxDB MCP Server Integration Tests", () => {
-  let docker;
-  let container;
+describeInflux("InfluxDB MCP Server Integration Tests", () => {
   // We won't use these for direct testing
   let mcpServerProcess = null;
   let mcpClient = null;
   let mcpServerEnv = null;
 
-  // Setup: Start InfluxDB container before all tests
+  // Setup: wait for the provided InfluxDB and create this run's bucket
   beforeAll(async () => {
-    // Initialize Docker
-    docker = new Docker();
-
-    console.log("Pulling InfluxDB image...");
-    await new Promise((resolve, reject) => {
-      docker.pull("influxdb:2.7", (err, stream) => {
-        if (err) {
-          return reject(err);
-        }
-        docker.modem.followProgress(stream, (err) => {
-          if (err) {
-            return reject(err);
-          }
-          resolve();
-        });
-      });
-    });
-
-    console.log("Creating InfluxDB container...");
-    container = await docker.createContainer({
-      Image: "influxdb:2.7",
-      ExposedPorts: {
-        "8086/tcp": {},
-      },
-      HostConfig: {
-        PortBindings: {
-          "8086/tcp": [{ HostPort: `${INFLUXDB_PORT}` }],
-        },
-      },
-      Env: [
-        `DOCKER_INFLUXDB_INIT_MODE=setup`,
-        `DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_USERNAME}`,
-        `DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_PASSWORD}`,
-        `DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_ORG}`,
-        `DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_BUCKET}`,
-        `DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_ADMIN_TOKEN}`,
-      ],
-    });
-
-    console.log("Starting InfluxDB container...");
-    await container.start();
-
-    // Wait for InfluxDB to be ready
     await waitForInfluxDBReady();
-
-    // Create a token to be used by our tests
-    await createInfluxDBToken();
+    await createRunBucket("integration");
 
     // Set up environment variables for direct testing of handlers
     mcpServerEnv = {
       ...process.env,
-      INFLUXDB_URL: `http://localhost:${INFLUXDB_PORT}`,
+      INFLUXDB_URL: `${INFLUXDB_URL}`,
       INFLUXDB_TOKEN: INFLUXDB_ADMIN_TOKEN,
       INFLUXDB_ORG: INFLUXDB_ORG,
     };
 
     // Set environment variables for the current process
     // This allows the direct handler tests to work properly
-    process.env.INFLUXDB_URL = `http://localhost:${INFLUXDB_PORT}`;
+    process.env.INFLUXDB_URL = `${INFLUXDB_URL}`;
     process.env.INFLUXDB_TOKEN = INFLUXDB_ADMIN_TOKEN;
     process.env.INFLUXDB_ORG = INFLUXDB_ORG;
 
@@ -110,7 +64,7 @@ describe("InfluxDB MCP Server Integration Tests", () => {
     });
   });
 
-  // Teardown: Stop and remove containers after all tests
+  // Teardown: stop the MCP client and server, delete this run's resources
   afterAll(async () => {
     console.log("Running test cleanup...");
 
@@ -182,86 +136,10 @@ describe("InfluxDB MCP Server Integration Tests", () => {
         console.log("Cleared global heartbeat interval");
       }
 
-      // Stop and remove InfluxDB container
-      if (container) {
-        try {
-          await container.stop().catch(() =>
-            console.log("Container may already be stopped")
-          );
-          await container.remove().catch(() =>
-            console.log("Container may already be removed")
-          );
-          console.log("InfluxDB container stopped and removed");
-        } catch (containerError) {
-          console.error(
-            "Error stopping/removing container:",
-            containerError.message,
-          );
-        }
-      }
-
-      // Extra cleanup - remove any leftover containers with similar image
-      try {
-        const docker = new Docker();
-        const containers = await docker.listContainers({ all: true });
-
-        // Collect promises for parallel execution
-        const cleanupPromises = [];
-
-        for (const containerInfo of containers) {
-          if (containerInfo.Image === "influxdb:2.7") {
-            console.log(`Removing leftover container ${containerInfo.Id}`);
-            const containerToRemove = docker.getContainer(containerInfo.Id);
-
-            const cleanupPromise = (async () => {
-              try {
-                await containerToRemove.stop().catch(() => {});
-                await containerToRemove.remove().catch(() => {});
-                console.log(
-                  `Successfully removed container ${containerInfo.Id}`,
-                );
-              } catch (err) {
-                console.error(
-                  `Failed to remove container ${containerInfo.Id}:`,
-                  err.message,
-                );
-              }
-            })();
-
-            cleanupPromises.push(cleanupPromise);
-          }
-        }
-
-        // Wait for all cleanup operations to finish
-        await Promise.allSettled(cleanupPromises);
-      } catch (cleanupError) {
-        console.error("Error during extra cleanup:", cleanupError.message);
-      }
-
-      // Also check and kill any node processes that might have been spawned
-      try {
-        console.log("Checking for lingering node processes...");
-
-        // Wait for pkill process to complete before finishing cleanup
-        await new Promise((resolve) => {
-          // In ES modules, we need to use the already imported spawn/exec function
-          const spawnProcess = spawn("pkill", ["-f", "node.*src/index.js"]);
-
-          spawnProcess.on("close", (code) => {
-            if (code !== 0 && code !== 1) { // code 1 just means no processes found
-              console.log(`Note: pkill exited with code ${code}`);
-            } else {
-              console.log("Process cleanup completed");
-            }
-            resolve();
-          });
-
-          // Set a timeout just in case
-          setTimeout(resolve, 1000);
-        });
-      } catch (e) {
-        console.error("Error killing lingering processes:", e.message);
-      }
+      // Delete only the buckets and orgs this run created
+      await deleteRunResources().catch((error) =>
+        console.error("Error deleting test resources:", error.message)
+      );
 
       console.log("Cleanup completed successfully");
     } catch (error) {
@@ -272,118 +150,6 @@ describe("InfluxDB MCP Server Integration Tests", () => {
       console.log("Test cleanup completed");
     }
   });
-
-  // Helper: Wait for InfluxDB to be ready
-  async function waitForInfluxDBReady() {
-    console.log("Waiting for InfluxDB to be ready...");
-    let ready = false;
-    let attempts = 0;
-    const maxAttempts = 30; // Maximum 30 seconds of waiting
-
-    while (!ready && attempts < maxAttempts) {
-      attempts++;
-      try {
-        const response = await fetch(
-          `http://localhost:${INFLUXDB_PORT}/health`,
-        );
-        const data = await response.json();
-        if (data.status === "pass") {
-          ready = true;
-          console.log("InfluxDB is ready!");
-        } else {
-          console.log(
-            `Waiting for InfluxDB to be ready... Attempt ${attempts}/${maxAttempts}`,
-          );
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-        }
-      } catch (error) {
-        console.log(
-          `Waiting for InfluxDB to start... Attempt ${attempts}/${maxAttempts}. Error: ${error.message}`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
-    }
-
-    if (!ready) {
-      throw new Error(
-        `InfluxDB failed to become ready after ${maxAttempts} attempts`,
-      );
-    }
-  }
-
-  // Helper: Create a token for the MCP server to use
-  async function createInfluxDBToken() {
-    console.log("Creating InfluxDB token for MCP server...");
-
-    // First, get the org ID
-    const orgResponse = await fetch(
-      `http://localhost:${INFLUXDB_PORT}/api/v2/orgs?org=${INFLUXDB_ORG}`,
-      {
-        method: "GET",
-        headers: {
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-      },
-    );
-
-    const orgData = await orgResponse.json();
-    if (!orgData.orgs || orgData.orgs.length === 0) {
-      throw new Error("Organization not found");
-    }
-
-    const orgID = orgData.orgs[0].id;
-
-    // Create a token with all privileges for this org
-    const tokenResponse = await fetch(
-      `http://localhost:${INFLUXDB_PORT}/api/v2/authorizations`,
-      {
-        method: "POST",
-        headers: {
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          description: "Token for MCP server tests",
-          orgID,
-          permissions: [
-            {
-              action: "read",
-              resource: {
-                type: "buckets",
-                orgID,
-              },
-            },
-            {
-              action: "write",
-              resource: {
-                type: "buckets",
-                orgID,
-              },
-            },
-            {
-              action: "read",
-              resource: {
-                type: "orgs",
-                orgID,
-              },
-            },
-            {
-              action: "write",
-              resource: {
-                type: "orgs",
-                orgID,
-              },
-            },
-          ],
-          token: INFLUXDB_TOKEN,
-        }),
-      },
-    );
-
-    const tokenData = await tokenResponse.json();
-    console.log("Token created:", tokenData.token ? "success" : "failure");
-  }
 
   // Helper: Write sample data to InfluxDB
   async function writeSampleData() {
@@ -398,7 +164,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
 
     try {
       const response = await fetch(
-        `http://localhost:${INFLUXDB_PORT}/api/v2/write?org=${INFLUXDB_ORG}&bucket=${INFLUXDB_BUCKET}&precision=ns`,
+        `${INFLUXDB_URL}/api/v2/write?org=${INFLUXDB_ORG}&bucket=${INFLUXDB_BUCKET}&precision=ns`,
         {
           method: "POST",
           headers: {
@@ -429,7 +195,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
     // Just store the environment for the client to use later
     mcpServerEnv = {
       ...process.env,
-      INFLUXDB_URL: `http://localhost:${INFLUXDB_PORT}`,
+      INFLUXDB_URL: `${INFLUXDB_URL}`,
       INFLUXDB_TOKEN: INFLUXDB_ADMIN_TOKEN, // Use admin token which has full access
       INFLUXDB_ORG: INFLUXDB_ORG,
       DEBUG: "mcp:*", // Add debug flags
@@ -445,8 +211,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
     try {
       // Debug: Check environment variables we're about to use
       console.log("MCP Client environment setup:", {
-        influxdbUrl: `http://localhost:${INFLUXDB_PORT}`,
-        token: INFLUXDB_TOKEN ? "Set" : "Not set",
+        influxdbUrl: `${INFLUXDB_URL}`,
         org: INFLUXDB_ORG,
       });
 
@@ -481,7 +246,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
       // NOTE: We must use the ADMIN token for testing because the regular token doesn't have access
       const serverEnv = {
         ...process.env,
-        INFLUXDB_URL: `http://localhost:${INFLUXDB_PORT}`,
+        INFLUXDB_URL: `${INFLUXDB_URL}`,
         INFLUXDB_TOKEN: INFLUXDB_ADMIN_TOKEN, // Use admin token instead of regular token
         INFLUXDB_ORG: INFLUXDB_ORG,
         DEBUG: "mcp:*", // Add debug logs for MCP protocol
@@ -832,7 +597,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
 
       // Verify data was written by checking via a direct API call
       const verifyResponse = await fetch(
-        `http://localhost:${INFLUXDB_PORT}/api/v2/query?org=${
+        `${INFLUXDB_URL}/api/v2/query?org=${
           encodeURIComponent(INFLUXDB_ORG)
         }`,
         {
@@ -922,7 +687,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
           console.log("About to request resource: influxdb://buckets");
         } else if (operationName === "List measurements") {
           console.log(
-            `About to request resource: influxdb://bucket/test-bucket/measurements`,
+            `About to request resource: influxdb://bucket/${INFLUXDB_BUCKET}/measurements`,
           );
         } else if (operationName === "List organizations via MCP") {
           console.log("About to request resource: influxdb://orgs");
@@ -997,7 +762,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
 
     try {
       // Test direct API call to list organizations
-      const apiUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/orgs`;
+      const apiUrl = `${INFLUXDB_URL}/api/v2/orgs`;
       console.log(`Making direct request to: ${apiUrl}`);
 
       const response = await fetch(apiUrl, {
@@ -1019,7 +784,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
       expect(data.orgs).toBeDefined();
       expect(Array.isArray(data.orgs)).toBe(true);
       expect(data.orgs.length).toBeGreaterThan(0);
-      expect(data.orgs[0].name).toBe(INFLUXDB_ORG);
+      expect(data.orgs.some((org) => org.name === INFLUXDB_ORG)).toBe(true);
 
       // Save the orgs for comparison
       console.log(
@@ -1097,7 +862,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
 
     try {
       // Get buckets via direct API
-      const bucketUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/buckets`;
+      const bucketUrl = `${INFLUXDB_URL}/api/v2/buckets`;
       console.log(`Making direct request to: ${bucketUrl}`);
 
       const response = await fetch(bucketUrl, {
@@ -1207,7 +972,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       });
 
       // Query measurements via direct API
-      const queryUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/query?org=${
+      const queryUrl = `${INFLUXDB_URL}/api/v2/query?org=${
         encodeURIComponent(INFLUXDB_ORG)
       }`;
       console.log(`Making query request to: ${queryUrl}`);
@@ -1321,7 +1086,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       });
 
       // Query measurements via direct API
-      const queryUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/query?org=${
+      const queryUrl = `${INFLUXDB_URL}/api/v2/query?org=${
         encodeURIComponent(INFLUXDB_ORG)
       }`;
       console.log(`Making direct fallback query to: ${queryUrl}`);
@@ -1368,16 +1133,17 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
         Date.now() * 1000000
       }`;
 
+    let serverProcess;
     try {
       // We'll spawn our server directly, communicate with it, then check if data was written
 
       // First, spawn the server process directly
-      const serverProcess = spawn(process.execPath, [
+      serverProcess = spawn(process.execPath, [
         path.join(__dirname, "../src/index.js"),
       ], {
         env: {
           ...process.env,
-          INFLUXDB_URL: `http://localhost:${INFLUXDB_PORT}`,
+          INFLUXDB_URL: `${INFLUXDB_URL}`,
           INFLUXDB_TOKEN: INFLUXDB_ADMIN_TOKEN,
           INFLUXDB_ORG: INFLUXDB_ORG,
         },
@@ -1388,7 +1154,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       await new Promise((resolve) => setTimeout(resolve, 1000));
 
       // Now we'll use the InfluxDB API directly to write data
-      const writeUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/write?org=${
+      const writeUrl = `${INFLUXDB_URL}/api/v2/write?org=${
         encodeURIComponent(INFLUXDB_ORG)
       }&bucket=${INFLUXDB_BUCKET}&precision=ns`;
 
@@ -1408,7 +1174,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       console.log(`Write response status: ${writeResponse.status}`);
 
       // Verify the data was written using a flux query
-      const queryUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/query?org=${
+      const queryUrl = `${INFLUXDB_URL}/api/v2/query?org=${
         encodeURIComponent(INFLUXDB_ORG)
       }`;
 
@@ -1434,13 +1200,13 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       expect(responseText).toContain("network_traffic");
       expect(responseText).toContain("gateway01");
 
-      // Clean up the server process
-      serverProcess.kill();
-
       console.log("Direct communication test completed successfully");
     } catch (error) {
       console.error("Direct communication test failed:", error.message);
       throw error;
+    } finally {
+      // Stop the process this test started, even when an assertion failed
+      serverProcess?.kill();
     }
   });
 
@@ -1485,7 +1251,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
     expect(toolResponse.error).toBeUndefined();
 
     // Verify data was written by querying via direct API
-    const queryUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/query?org=${
+    const queryUrl = `${INFLUXDB_URL}/api/v2/query?org=${
       encodeURIComponent(INFLUXDB_ORG)
     }`;
 
@@ -1534,7 +1300,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
         |> filter(fn: (r) => r._measurement == "cpu_usage")
         |> limit(n: 10)`;
 
-      const queryUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/query?org=${
+      const queryUrl = `${INFLUXDB_URL}/api/v2/query?org=${
         encodeURIComponent(INFLUXDB_ORG)
       }`;
 
@@ -1637,7 +1403,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       // If the tool call fails or response structure doesn't match expectations, do a direct API call
       console.log("Using direct API fallback for query");
 
-      const queryUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/query?org=${
+      const queryUrl = `${INFLUXDB_URL}/api/v2/query?org=${
         encodeURIComponent(INFLUXDB_ORG)
       }`;
 
@@ -1670,7 +1436,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
 
     try {
       // First, get the org ID
-      const orgsUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/orgs?org=${
+      const orgsUrl = `${INFLUXDB_URL}/api/v2/orgs?org=${
         encodeURIComponent(INFLUXDB_ORG)
       }`;
       console.log(`Getting organization info from: ${orgsUrl}`);
@@ -1692,7 +1458,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       console.log(`Found organization ID: ${orgID}`);
 
       // Create a new bucket
-      const newBucketName = `test-bucket-direct-${Date.now()}`;
+      const newBucketName = uniqueName("bucket-direct");
       const bucketData = {
         name: newBucketName,
         orgID: orgID,
@@ -1701,7 +1467,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
         ],
       };
 
-      const createUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/buckets`;
+      const createUrl = `${INFLUXDB_URL}/api/v2/buckets`;
       console.log(`Creating bucket at: ${createUrl}`);
 
       const createResponse = await fetch(createUrl, {
@@ -1721,7 +1487,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       expect(bucket.orgID).toBe(orgID);
 
       // Verify bucket exists by listing all buckets
-      const listUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/buckets`;
+      const listUrl = `${INFLUXDB_URL}/api/v2/buckets`;
       const listResponse = await fetch(listUrl, {
         method: "GET",
         headers: {
@@ -1750,7 +1516,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
 
     try {
       // First, get the org ID
-      const orgsUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/orgs?org=${
+      const orgsUrl = `${INFLUXDB_URL}/api/v2/orgs?org=${
         encodeURIComponent(INFLUXDB_ORG)
       }`;
       console.log(`Getting organization info from: ${orgsUrl}`);
@@ -1776,7 +1542,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       const client = await initializeMcpClient();
 
       // Create a unique bucket name for this test
-      const newBucketName = `test-bucket-mcp-${Date.now()}`;
+      const newBucketName = uniqueName("bucket-mcp");
 
       // Use the create-bucket tool
       console.log("Invoking create-bucket tool via MCP client...");
@@ -1846,7 +1612,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       try {
         // Try creating the bucket if we reached here without a created bucket
         // This is a fallback in case both the MCP method and the direct API method failed
-        const createUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/buckets`;
+        const createUrl = `${INFLUXDB_URL}/api/v2/buckets`;
         const bucketData = {
           name: newBucketName,
           orgID: orgID,
@@ -1875,7 +1641,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       }
 
       // Verify bucket exists by listing via direct API
-      const listUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/buckets`;
+      const listUrl = `${INFLUXDB_URL}/api/v2/buckets`;
       const listResponse = await fetch(listUrl, {
         method: "GET",
         headers: {
@@ -1928,7 +1694,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
         |> limit(n: 10)`;
 
       // Execute the query directly via InfluxDB API
-      const queryUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/query?org=${
+      const queryUrl = `${INFLUXDB_URL}/api/v2/query?org=${
         encodeURIComponent(INFLUXDB_ORG)
       }`;
 
@@ -1963,84 +1729,12 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
 
   // Test: Check flux-query-examples prompt content in server code
   test("should have valid flux-query-examples prompt", async () => {
-    console.log("Testing flux-query-examples prompt content...");
+    const prompt = await fluxQueryExamplesPrompt();
+    const text = prompt.messages[0].content.text;
 
-    try {
-      // In this test, we'll directly load and check the server code
-      // to verify the prompt content is properly defined
-
-      // We'll use child_process to run a script that imports and tests the prompt
-      const testScript = `
-      import { promises as fs } from 'fs';
-
-      async function testPrompt() {
-        try {
-          // Check the new file paths after refactoring
-          const serverFilePath = '${__dirname}/../src/server.js';
-          const promptFilePath = '${__dirname}/../src/prompts/fluxQueryExamplesPrompt.js';
-
-          // Check in the main file and the prompt file
-          const indexContent = await fs.readFile(serverFilePath, 'utf8');
-          const promptContent = await fs.readFile(promptFilePath, 'utf8');
-
-          // Check if the server has flux-query-examples prompt defined
-          const hasFluxPrompt = indexContent.includes('flux-query-examples') &&
-                                indexContent.includes('fluxQueryExamplesPrompt');
-
-          // Check if the prompt file has example content
-          const hasExampleContent = promptContent.includes('Example Flux queries') ||
-                                   promptContent.includes('from(bucket:') ||
-                                   promptContent.includes('range(start:');
-
-          console.log(JSON.stringify({ hasFluxPrompt, hasExampleContent }));
-        } catch (error) {
-          console.error('Error:', error.message);
-          process.exit(1);
-        }
-      }
-
-      testPrompt();
-      `;
-
-      // Write this script to a temporary file
-      const tempScriptPath = path.join(__dirname, "temp-test-prompt.js");
-      await fs.promises.writeFile(tempScriptPath, testScript);
-
-      // Execute the script
-      const { stdout, stderr } = await new Promise((resolve, reject) => {
-        const child = spawn(process.execPath, [tempScriptPath], {
-          env: process.env,
-        });
-
-        let stdout = "";
-        let stderr = "";
-
-        child.stdout.on("data", (data) => {
-          stdout += data.toString();
-        });
-
-        child.stderr.on("data", (data) => {
-          stderr += data.toString();
-        });
-
-        child.on("close", (code) => {
-          resolve({ stdout, stderr, code });
-        });
-      });
-
-      // Clean up the temporary file
-      await fs.promises.unlink(tempScriptPath);
-
-      // Parse the output and verify
-      const result = JSON.parse(stdout);
-      expect(result.hasFluxPrompt).toBe(true);
-      expect(result.hasExampleContent).toBe(true);
-
-      console.log("Flux query examples prompt test completed successfully");
-    } catch (error) {
-      console.error("Flux query examples prompt test failed:", error.message);
-      throw error;
-    }
+    expect(prompt.messages[0].role).toBe("user");
+    expect(text).toContain("from(bucket:");
+    expect(text).toContain("range(start:");
   });
 
   // Test: Compare org IDs between buckets and organizations to find discrepancies
@@ -2049,7 +1743,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
 
     try {
       // Get orgs via direct API
-      const orgsUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/orgs`;
+      const orgsUrl = `${INFLUXDB_URL}/api/v2/orgs`;
       const orgsResponse = await fetch(orgsUrl, {
         method: "GET",
         headers: {
@@ -2063,7 +1757,7 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
       const orgsData = await orgsResponse.json();
 
       // Get buckets via direct API
-      const bucketsUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/buckets`;
+      const bucketsUrl = `${INFLUXDB_URL}/api/v2/buckets`;
       const bucketsResponse = await fetch(bucketsUrl, {
         method: "GET",
         headers: {
@@ -2195,83 +1889,11 @@ schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
 
   // Test: Check line-protocol-guide prompt content in server code
   test("should have valid line-protocol-guide prompt", async () => {
-    console.log("Testing line-protocol-guide prompt content...");
+    const prompt = await lineProtocolGuidePrompt();
+    const text = prompt.messages[0].content.text;
 
-    try {
-      // In this test, we'll directly load and check the server code
-      // to verify the prompt content is properly defined
-
-      // We'll use child_process to run a script that imports and tests the prompt
-      const testScript = `
-      import { promises as fs } from 'fs';
-
-      async function testPrompt() {
-        try {
-          // Check the new file paths after refactoring
-          const serverFilePath = '${__dirname}/../src/server.js';
-          const promptFilePath = '${__dirname}/../src/prompts/lineProtocolGuidePrompt.js';
-
-          // Check in the main file and the prompt file
-          const indexContent = await fs.readFile(serverFilePath, 'utf8');
-          const promptContent = await fs.readFile(promptFilePath, 'utf8');
-
-          // Check if the server has line-protocol-guide prompt defined
-          const hasPrompt = indexContent.includes('line-protocol-guide') &&
-                            indexContent.includes('lineProtocolGuidePrompt');
-
-          // Check if the prompt file has example content
-          const hasContent = promptContent.includes('Line Protocol Guide') ||
-                           promptContent.includes('measurement,tag-key=tag-value') ||
-                           promptContent.includes('Components:');
-
-          console.log(JSON.stringify({ hasPrompt, hasContent }));
-        } catch (error) {
-          console.error('Error:', error.message);
-          process.exit(1);
-        }
-      }
-
-      testPrompt();
-      `;
-
-      // Write this script to a temporary file
-      const tempScriptPath = path.join(__dirname, "temp-test-prompt2.js");
-      await fs.promises.writeFile(tempScriptPath, testScript);
-
-      // Execute the script
-      const { stdout, stderr } = await new Promise((resolve, reject) => {
-        const child = spawn(process.execPath, [tempScriptPath], {
-          env: process.env,
-        });
-
-        let stdout = "";
-        let stderr = "";
-
-        child.stdout.on("data", (data) => {
-          stdout += data.toString();
-        });
-
-        child.stderr.on("data", (data) => {
-          stderr += data.toString();
-        });
-
-        child.on("close", (code) => {
-          resolve({ stdout, stderr, code });
-        });
-      });
-
-      // Clean up the temporary file
-      await fs.promises.unlink(tempScriptPath);
-
-      // Parse the output and verify
-      const result = JSON.parse(stdout);
-      expect(result.hasPrompt).toBe(true);
-      expect(result.hasContent).toBe(true);
-
-      console.log("Line protocol guide prompt test completed successfully");
-    } catch (error) {
-      console.error("Line protocol guide prompt test failed:", error.message);
-      throw error;
-    }
+    expect(prompt.messages[0].role).toBe("user");
+    expect(text).toContain("Line Protocol");
+    expect(text).toContain("measurement,tag-key=tag-value");
   });
 });

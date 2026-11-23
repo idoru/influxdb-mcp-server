@@ -1,0 +1,25 @@
+# Throwaway InfluxDB for the integration suites. Start it with
+# scripts/test-influx.sh, which generates the credentials below.
+# The tests themselves never talk to Docker.
+services:
+  influxdb:
+    # influxdb:2.7, multi-arch index pinned by digest
+    image: influxdb:2.7@sha256:b8d940ca9376f85118260f5b6bd236b8a00b1749c3350c5578d4cde8e27f31f2
+    ports:
+      - "127.0.0.1:${INFLUXDB_TEST_PORT:-8086}:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: test-admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_TEST_PASSWORD:?set by scripts/test-influx.sh}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUXDB_TEST_ORG:-test-org}
+      DOCKER_INFLUXDB_INIT_BUCKET: test-bucket
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_TEST_ADMIN_TOKEN:?set by scripts/test-influx.sh}
+    tmpfs:
+      - /var/lib/influxdb2
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

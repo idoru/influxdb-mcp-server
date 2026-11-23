@@ -1,5 +1,12 @@
 import { jest } from "@jest/globals";
-import Docker from "dockerode";
+import {
+  createRunBucket,
+  deleteRunResources,
+  describeInflux,
+  influx,
+  uniqueName,
+  waitForInfluxDBReady,
+} from "../tests/support/influx.js";
 
 // We'll import handlers dynamically after setting environment variables
 let listOrganizations;
@@ -11,85 +18,32 @@ let queryData;
 let createBucket;
 let createOrg;
 
-// Generate a random port between 10000 and 20000 to avoid conflicts
-const getRandomPort = () => Math.floor(Math.random() * 10000) + 10000;
+// The InfluxDB instance comes from INFLUXDB_TEST_* (see tests/support/influx.js)
+const INFLUXDB_URL = influx.url;
+const INFLUXDB_ADMIN_TOKEN = influx.adminToken;
+const INFLUXDB_ORG = influx.org;
+// This suite writes to its own bucket, created in beforeAll and deleted in afterAll
+const INFLUXDB_BUCKET = uniqueName("handlers");
 
-// Configuration for tests
-const INFLUXDB_PORT = getRandomPort();
-console.log(`Using InfluxDB port: ${INFLUXDB_PORT}`);
-const INFLUXDB_ADMIN_TOKEN = "admintoken123";
-const INFLUXDB_ORG = "test-org";
-const INFLUXDB_BUCKET = "test-bucket";
-const INFLUXDB_USERNAME = "admin";
-const INFLUXDB_PASSWORD = "adminpassword";
-
-// Increased test timeout for Docker operations
-jest.setTimeout(60000); // 60 seconds for Docker operations
+jest.setTimeout(60000);
 
 // Direct handler testing
-describe("InfluxDB MCP Server Direct Handler Tests", () => {
-  let docker;
-  let container;
+describeInflux("InfluxDB MCP Server Direct Handler Tests", () => {
 
-  // Setup: Start InfluxDB container before all tests
+  // Setup: wait for the provided InfluxDB and create this suite's bucket
   beforeAll(async () => {
-    // Initialize Docker
-    docker = new Docker();
-
-    console.log("Pulling InfluxDB image...");
-    await new Promise((resolve, reject) => {
-      docker.pull("influxdb:2.7", (err, stream) => {
-        if (err) {
-          return reject(err);
-        }
-        docker.modem.followProgress(stream, (err) => {
-          if (err) {
-            return reject(err);
-          }
-          resolve();
-        });
-      });
-    });
-
-    console.log("Creating InfluxDB container...");
-    container = await docker.createContainer({
-      Image: "influxdb:2.7",
-      ExposedPorts: {
-        "8086/tcp": {},
-      },
-      HostConfig: {
-        PortBindings: {
-          "8086/tcp": [{ HostPort: `${INFLUXDB_PORT}` }],
-        },
-      },
-      Env: [
-        `DOCKER_INFLUXDB_INIT_MODE=setup`,
-        `DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_USERNAME}`,
-        `DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_PASSWORD}`,
-        `DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_ORG}`,
-        `DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_BUCKET}`,
-        `DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_ADMIN_TOKEN}`,
-      ],
-    });
-
-    console.log("Starting InfluxDB container...");
-    await container.start();
-
-    // Wait for InfluxDB to be ready
     await waitForInfluxDBReady();
-
-    // Create a token to be used by our tests
-    await createInfluxDBToken();
+    await createRunBucket("handlers");
 
     // Set environment variables for direct testing of handlers
-    process.env.INFLUXDB_URL = `http://localhost:${INFLUXDB_PORT}`;
+    process.env.INFLUXDB_URL = `${INFLUXDB_URL}`;
     process.env.INFLUXDB_TOKEN = INFLUXDB_ADMIN_TOKEN;
     process.env.INFLUXDB_ORG = INFLUXDB_ORG;
 
     // Monkey patch the env module by replacing imports dynamically
     // This is needed because handlers import env.js at module load time
     jest.unstable_mockModule("../src/config/env.js", () => ({
-      INFLUXDB_URL: `http://localhost:${INFLUXDB_PORT}`,
+      INFLUXDB_URL: `${INFLUXDB_URL}`,
       INFLUXDB_TOKEN: INFLUXDB_ADMIN_TOKEN,
       DEFAULT_ORG: INFLUXDB_ORG,
       DEFAULT_BUCKET: INFLUXDB_BUCKET,
@@ -132,184 +86,19 @@ describe("InfluxDB MCP Server Direct Handler Tests", () => {
     });
   });
 
-  // Teardown: Stop and remove containers after all tests
+  // Teardown: delete the buckets and orgs this run created
   afterAll(async () => {
     console.log("Running test cleanup...");
 
     try {
-      // Stop and remove InfluxDB container
-      if (container) {
-        await container.stop().catch(() =>
-          console.log("Container may already be stopped")
-        );
-        await container.remove().catch(() =>
-          console.log("Container may already be removed")
-        );
-        console.log("InfluxDB container stopped and removed");
-      }
-
-      // Extra cleanup - remove any leftover containers with similar image
-      try {
-        const docker = new Docker();
-        const containers = await docker.listContainers({ all: true });
-
-        // Collect promises for parallel execution
-        const cleanupPromises = [];
-
-        for (const containerInfo of containers) {
-          if (containerInfo.Image === "influxdb:2.7") {
-            console.log(`Removing leftover container ${containerInfo.Id}`);
-            const containerToRemove = docker.getContainer(containerInfo.Id);
-
-            const cleanupPromise = (async () => {
-              try {
-                await containerToRemove.stop().catch(() => {});
-                await containerToRemove.remove().catch(() => {});
-                console.log(
-                  `Successfully removed container ${containerInfo.Id}`,
-                );
-              } catch (err) {
-                console.error(
-                  `Failed to remove container ${containerInfo.Id}:`,
-                  err.message,
-                );
-              }
-            })();
-
-            cleanupPromises.push(cleanupPromise);
-          }
-        }
-
-        // Wait for all cleanup operations to finish
-        await Promise.allSettled(cleanupPromises);
-      } catch (cleanupError) {
-        console.error("Error during extra cleanup:", cleanupError.message);
-      }
+      // Delete only the buckets and orgs this run created
+      await deleteRunResources();
 
       console.log("Cleanup completed successfully");
     } catch (error) {
       console.error("Error during test cleanup:", error.message);
     }
   });
-
-  // Helper: Wait for InfluxDB to be ready
-  async function waitForInfluxDBReady() {
-    console.log("Waiting for InfluxDB to be ready...");
-    let ready = false;
-    let attempts = 0;
-    const maxAttempts = 30;
-
-    while (!ready && attempts < maxAttempts) {
-      attempts++;
-      try {
-        const response = await fetch(
-          `http://localhost:${INFLUXDB_PORT}/health`,
-        );
-        const data = await response.json();
-        if (data.status === "pass") {
-          ready = true;
-          console.log("InfluxDB is ready!");
-        } else {
-          console.log(
-            `Waiting for InfluxDB to be ready... Attempt ${attempts}/${maxAttempts}`,
-          );
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-        }
-      } catch (error) {
-        console.log(
-          `Waiting for InfluxDB to start... Attempt ${attempts}/${maxAttempts}. Error: ${error.message}`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
-    }
-
-    if (!ready) {
-      throw new Error(
-        `InfluxDB failed to become ready after ${maxAttempts} attempts`,
-      );
-    }
-  }
-
-  // Helper: Create a token for the tests
-  async function createInfluxDBToken() {
-    console.log("Creating InfluxDB token for tests...");
-
-    try {
-      // First, get the org ID
-      const orgResponse = await fetch(
-        `http://localhost:${INFLUXDB_PORT}/api/v2/orgs?org=${INFLUXDB_ORG}`,
-        {
-          method: "GET",
-          headers: {
-            "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-        },
-      );
-
-      const orgData = await orgResponse.json();
-      if (!orgData.orgs || orgData.orgs.length === 0) {
-        throw new Error("Organization not found");
-      }
-
-      const orgID = orgData.orgs[0].id;
-
-      // Create a token with all privileges for this org
-      const tokenResponse = await fetch(
-        `http://localhost:${INFLUXDB_PORT}/api/v2/authorizations`,
-        {
-          method: "POST",
-          headers: {
-            "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            description: "Token for direct handler tests",
-            orgID,
-            permissions: [
-              {
-                action: "read",
-                resource: {
-                  type: "buckets",
-                  orgID,
-                },
-              },
-              {
-                action: "write",
-                resource: {
-                  type: "buckets",
-                  orgID,
-                },
-              },
-              {
-                action: "read",
-                resource: {
-                  type: "orgs",
-                  orgID,
-                },
-              },
-              {
-                action: "write",
-                resource: {
-                  type: "orgs",
-                  orgID,
-                },
-              },
-            ],
-          }),
-        },
-      );
-
-      const tokenData = await tokenResponse.json();
-      console.log(
-        "Test token created:",
-        tokenData.token ? "success" : "failure",
-      );
-    } catch (error) {
-      console.error("Error creating test token:", error.message);
-      throw error;
-    }
-  }
 
   // Helper: Write sample data to InfluxDB
   async function writeSampleData() {
@@ -324,7 +113,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
 
     try {
       const response = await fetch(
-        `http://localhost:${INFLUXDB_PORT}/api/v2/write?org=${INFLUXDB_ORG}&bucket=${INFLUXDB_BUCKET}&precision=ns`,
+        `${INFLUXDB_URL}/api/v2/write?org=${INFLUXDB_ORG}&bucket=${INFLUXDB_BUCKET}&precision=ns`,
         {
           method: "POST",
           headers: {
@@ -546,7 +335,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
     expect(response.content[0].text).toBeDefined();
 
     // Verify data was written by querying via direct API
-    const queryUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/query?org=${
+    const queryUrl = `${INFLUXDB_URL}/api/v2/query?org=${
       encodeURIComponent(INFLUXDB_ORG)
     }`;
 
@@ -621,7 +410,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
 
     // First, get the org ID
     const orgResponse = await fetch(
-      `http://localhost:${INFLUXDB_PORT}/api/v2/orgs?org=${INFLUXDB_ORG}`,
+      `${INFLUXDB_URL}/api/v2/orgs?org=${INFLUXDB_ORG}`,
       {
         method: "GET",
         headers: {
@@ -636,7 +425,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
     console.log(`Found organization ID: ${orgID}`);
 
     // Create a unique bucket name for this test
-    const newBucketName = `test-bucket-handler-${Date.now()}`;
+    const newBucketName = uniqueName("bucket-handler");
 
     // Call the handler function directly with parameters
     const response = await createBucket({
@@ -681,7 +470,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
     }
 
     // Verify bucket exists by listing via direct API
-    const listUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/buckets`;
+    const listUrl = `${INFLUXDB_URL}/api/v2/buckets`;
     const listResponse = await fetch(listUrl, {
       method: "GET",
       headers: {
@@ -702,7 +491,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
     console.log("Testing createOrg tool handler...");
 
     // Create a unique organization name for this test
-    const newOrgName = `test-org-handler-${Date.now()}`;
+    const newOrgName = uniqueName("org-handler");
 
     // Call the handler function directly with parameters
     const response = await createOrg({
@@ -744,7 +533,7 @@ temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
     }
 
     // Verify organization exists by listing via direct API
-    const listUrl = `http://localhost:${INFLUXDB_PORT}/api/v2/orgs`;
+    const listUrl = `${INFLUXDB_URL}/api/v2/orgs`;
     const listResponse = await fetch(listUrl, {
       method: "GET",
       headers: {

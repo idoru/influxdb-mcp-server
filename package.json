@@ -10,7 +10,9 @@
     "influxdb-mcp-server": "src/index.js"
   },
   "scripts": {
-    "test": "NODE_OPTIONS=--experimental-vm-modules jest --detectOpenHandles --runInBand",
+    "test": "NODE_OPTIONS=--experimental-vm-modules jest --detectOpenHandles --runInBand --testPathIgnorePatterns '/node_modules/|/tests/integration\\.test\\.js$|/direct-tests/'",
+    "test:integration": "NODE_OPTIONS=--experimental-vm-modules jest --detectOpenHandles --runInBand tests/integration.test.js direct-tests",
+    "test:all": "NODE_OPTIONS=--experimental-vm-modules jest --detectOpenHandles --runInBand",
     "start": "node src/index.js"
   },
   "keywords": [
@@ -40,10 +42,8 @@
   },
   "devDependencies": {
     "@jest/globals": "^29.7.0",
-    "@types/dockerode": "^4.0.2",
     "@types/jest": "^29.5.5",
     "@types/node": "^22.13.10",
-    "dockerode": "^5.0.1",
     "jest": "^29.7.0",
     "ts-jest": "^29.1.1",
     "typescript": "^5.8.2",
