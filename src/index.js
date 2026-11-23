@@ -69,7 +69,7 @@ if (options.http === undefined) {
     process.exit(1);
   }
 
-  const { port, host, authToken, allowUnauthenticated, allowedHosts } = config;
+  const { port, host, authToken, allowUnauthenticated, allowedHosts, allowedOrigins, maxConcurrent } = config;
   const app = createHttpApp({ createMcpServer, ...config });
 
   const httpServer = app.listen(port, host, () => {
@@ -78,6 +78,10 @@ if (options.http === undefined) {
     console.log(
       `Authentication: ${authToken ? "bearer token required" : "none"}; ` +
         `Host header validation: ${allowedHosts ? allowedHosts.join(", ") : "disabled"}`,
+    );
+    console.log(
+      `Allowed browser origins: ${allowedOrigins.length ? allowedOrigins.join(", ") : "none"}; ` +
+        `max concurrent requests: ${maxConcurrent}`,
     );
     if (!authToken && allowUnauthenticated) {
       console.warn(

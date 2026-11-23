@@ -164,6 +164,135 @@ describe("HTTP transport hardening", () => {
     });
   });
 
+  describe("Origin validation", () => {
+    let port;
+    let authedPort;
+
+    beforeAll(async () => {
+      port = await listen({ allowedOrigins: ["https://app.example.com"] });
+      authedPort = await listen({ allowedOrigins: [], authToken: "s3cret-token" });
+    });
+
+    test("serves native clients that send no Origin", async () => {
+      const res = await request(port, { body: INITIALIZE });
+      expect(res.status).toBe(200);
+    });
+
+    test("rejects a foreign Origin", async () => {
+      const res = await request(port, { body: INITIALIZE, headers: { Origin: "https://evil.example" } });
+      expect(res.status).toBe(403);
+      expect(JSON.parse(res.text).error.message).toContain("Origin not allowed");
+    });
+
+    test("rejects the opaque null Origin", async () => {
+      const res = await request(port, { body: INITIALIZE, headers: { Origin: "null" } });
+      expect(res.status).toBe(403);
+    });
+
+    test("accepts an allowed Origin case-insensitively", async () => {
+      const res = await request(port, { body: INITIALIZE, headers: { Origin: "https://APP.example.com" } });
+      expect(res.status).toBe(200);
+    });
+
+    test("checks Origin before authentication and body parsing", async () => {
+      const res = await request(authedPort, { body: "{not json", headers: { Origin: "https://evil.example" } });
+      expect(res.status).toBe(403);
+    });
+  });
+
+  describe("concurrency limit", () => {
+    test("answers 503 with Retry-After once the limit is reached", async () => {
+      let entered;
+      const handlerEntered = new Promise((resolve) => (entered = resolve));
+      // A server whose connect() never settles holds its request slot open
+      const stalledServer = () => ({
+        connect: () => {
+          entered();
+          return new Promise(() => {});
+        },
+        close: async () => {},
+      });
+      const app = createHttpApp({
+        createMcpServer: stalledServer,
+        bodyLimit: "4mb",
+        allowedHosts: null,
+        maxConcurrent: 1,
+      });
+      const server = await new Promise((resolve) => {
+        const s = app.listen(0, "127.0.0.1", () => resolve(s));
+      });
+      servers.push(server);
+      const port = server.address().port;
+
+      const payload = JSON.stringify(INITIALIZE);
+      const held = http.request({
+        host: "127.0.0.1",
+        port,
+        path: "/mcp",
+        method: "POST",
+        headers: {
+          Host: `localhost:${port}`,
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "Content-Length": Buffer.byteLength(payload),
+        },
+      });
+      held.on("error", () => {});
+      held.end(payload);
+      await handlerEntered;
+
+      const res = await request(port, { body: INITIALIZE });
+      expect(res.status).toBe(503);
+      expect(res.headers["retry-after"]).toBe("1");
+
+      held.destroy();
+    });
+  });
+
+  describe("response headers and access log", () => {
+    let port;
+
+    beforeAll(async () => {
+      port = await listen({});
+    });
+
+    test("sets nosniff and no-store", async () => {
+      const res = await request(port, { method: "GET" });
+      expect(res.headers["x-content-type-options"]).toBe("nosniff");
+      expect(res.headers["cache-control"]).toBe("no-store");
+    });
+
+    test("keeps no-store on MCP responses the SDK writes itself", async () => {
+      const res = await request(port, { body: INITIALIZE });
+      expect(res.status).toBe(200);
+      expect(res.headers["x-content-type-options"]).toBe("nosniff");
+      expect(res.headers["cache-control"]).toMatch(/(^|,\s*)no-store(,|$)/);
+      expect(parseRpc(res.text).result.serverInfo.name).toBe("InfluxDB");
+    });
+
+    test("logs the tool name but never its arguments", async () => {
+      const lines = [];
+      const spy = jest.spyOn(console, "log").mockImplementation((...args) => lines.push(args.join(" ")));
+      try {
+        await request(port, {
+          body: {
+            jsonrpc: "2.0",
+            id: 7,
+            method: "tools/call",
+            params: { name: "no-such-tool\nforged line", arguments: { query: "SECRET-MARKER" } },
+          },
+        });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      } finally {
+        spy.mockRestore();
+      }
+      const access = lines.filter((line) => line.startsWith("HTTP POST /mcp"));
+      expect(access).toHaveLength(1);
+      expect(access[0]).toMatch(/ 200 \d+ms client=\S+ rpc=tools\/call:no-such-tool\?forged line$/);
+      expect(lines.join("\n")).not.toContain("SECRET-MARKER");
+    });
+  });
+
   describe("request handling", () => {
     let port;
 
