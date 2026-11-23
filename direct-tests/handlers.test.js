@@ -1,6 +1,5 @@
 import { jest } from "@jest/globals";
 import Docker from "dockerode";
-import fetch from "node-fetch";
 
 // We'll import handlers dynamically after setting environment variables
 let listOrganizations;

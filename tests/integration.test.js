@@ -1,7 +1,6 @@
 import { jest } from "@jest/globals";
 import { spawn } from "child_process";
 import Docker from "dockerode";
-import fetch from "node-fetch";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import * as path from "path";

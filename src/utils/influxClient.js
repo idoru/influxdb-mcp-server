@@ -1,4 +1,3 @@
-import fetch from "node-fetch";
 import { INFLUXDB_TOKEN, INFLUXDB_URL, MAX_RESPONSE_BYTES } from "../config/env.js";
 
 export const DEFAULT_TIMEOUT_MS = 10000;
@@ -47,7 +46,7 @@ function describeFetchError(error) {
   return new Error(`Could not reach InfluxDB${code ? ` (${code})` : ""}`);
 }
 
-// Helper for InfluxDB API requests. The timeout covers the whole exchange,
+// Helper for InfluxDB API requests, using the built-in fetch. The timeout covers the whole exchange,
 // including reading the response body via text() or json(), not just the
 // arrival of response headers. Response bodies are capped at
 // MAX_RESPONSE_BYTES.
