@@ -1,3 +1,5 @@
+import { readSecret } from "./secrets.js";
+
 // Configuration for the Streamable HTTP transport, resolved from CLI options
 // and environment variables. Throws an Error with a user-facing message when
 // the configuration is invalid or unsafe.
@@ -80,7 +82,7 @@ export function resolveHttpConfig(options = {}, env = process.env) {
   const port = parsePort(options.http);
   // listen() expects IPv6 addresses without brackets
   const host = (options.host || env.MCP_HTTP_HOST || DEFAULT_HTTP_HOST).trim().replace(/^\[(.*)\]$/, "$1");
-  const authToken = env.MCP_AUTH_TOKEN?.trim() || undefined;
+  const authToken = readSecret(env, "MCP_AUTH_TOKEN")?.trim() || undefined;
   if (authToken && /\s/.test(authToken)) {
     throw new Error("MCP_AUTH_TOKEN must not contain whitespace.");
   }

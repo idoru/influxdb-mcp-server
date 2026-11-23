@@ -28,6 +28,9 @@ const { version } = createRequire(import.meta.url)("../package.json");
 const withEnvDefault = (schema, envDefault) =>
   envDefault ? schema.optional() : schema;
 
+// Upper bound for bucket retention (about 100 years)
+const MAX_RETENTION_SECONDS = 100 * 365 * 24 * 60 * 60;
+
 // Create and configure a new MCP server instance
 export const createMcpServer = () => {
   const server = new McpServer({
@@ -146,18 +149,22 @@ export const createMcpServer = () => {
         inputSchema: {
           name: z
             .string()
+            .min(1)
+            .max(255)
             .describe(
               "Friendly bucket name. Follow InfluxDB naming rules (alphanumeric, dashes, underscores).",
             ),
           orgID: z
             .string()
+            .regex(/^[0-9a-f]{16}$/, "orgID must be a 16-character hexadecimal InfluxDB ID")
             .describe(
-              "Organization ID (UUID) that will own the bucket. Retrieve it from the organizations resource or create-org output.",
+              "Organization ID (16 hexadecimal characters) that will own the bucket. Retrieve it from the organizations resource or create-org output.",
             ),
           retentionPeriodSeconds: z
             .number()
             .int()
             .nonnegative()
+            .max(MAX_RETENTION_SECONDS)
             .optional()
             .describe(
               "Optional retention duration expressed in whole seconds. Omit (or pass 0) for infinite retention.",
@@ -180,11 +187,14 @@ export const createMcpServer = () => {
         inputSchema: {
           name: z
             .string()
+            .min(1)
+            .max(255)
             .describe(
               "Display name for the organization as it should appear in InfluxDB Cloud/OSS.",
             ),
           description: z
             .string()
+            .max(1024)
             .optional()
             .describe(
               "Optional free-form description that helps humans understand why the org exists.",

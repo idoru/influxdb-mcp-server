@@ -1,5 +1,7 @@
 // Configuration from environment variables. Importing this module never
 // throws; validateEnvironment() reports invalid settings and exits.
+import { isLoopbackHost } from "./http.js";
+import { readSecret } from "./secrets.js";
 
 const configErrors = [];
 
@@ -23,10 +25,51 @@ function parsePositiveInteger(name, value, fallback) {
   return number;
 }
 
+export const DEFAULT_INFLUXDB_URL = "http://localhost:8086";
 export const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 
-export const INFLUXDB_URL = process.env.INFLUXDB_URL || "http://localhost:8086";
-export const INFLUXDB_TOKEN = process.env.INFLUXDB_TOKEN;
+// Validate an InfluxDB base URL and normalize it without a trailing slash.
+// Only http(s) is accepted. Credentials, query strings and fragments are
+// rejected; a path prefix (e.g. behind a reverse proxy) is kept. Error
+// messages never echo the value, which may contain credentials.
+export function parseInfluxUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("INFLUXDB_URL is not a valid URL. Expected e.g. http://localhost:8086");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("INFLUXDB_URL must use http:// or https://");
+  }
+  if (url.username || url.password) {
+    throw new Error("INFLUXDB_URL must not contain credentials; use INFLUXDB_TOKEN instead");
+  }
+  if (url.search || url.hash || /[?#]/.test(value)) {
+    throw new Error("INFLUXDB_URL must not contain a query string or fragment");
+  }
+  return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+}
+
+const rawInfluxUrl = process.env.INFLUXDB_URL || DEFAULT_INFLUXDB_URL;
+let influxUrl;
+try {
+  influxUrl = parseInfluxUrl(rawInfluxUrl);
+} catch (error) {
+  configErrors.push(error.message);
+  influxUrl = DEFAULT_INFLUXDB_URL;
+}
+export const INFLUXDB_URL = influxUrl;
+
+let influxToken;
+let influxTokenError = false;
+try {
+  influxToken = readSecret(process.env, "INFLUXDB_TOKEN");
+} catch (error) {
+  influxTokenError = true;
+  configErrors.push(error.message);
+}
+export const INFLUXDB_TOKEN = influxToken;
 export const DEFAULT_ORG = process.env.INFLUXDB_ORG;
 export const DEFAULT_BUCKET = process.env.INFLUXDB_BUCKET;
 
@@ -53,13 +96,20 @@ export const ENABLE_QUERY_RESOURCE = parseFlag(
 // Check required environment variables
 export function validateEnvironment() {
   const errors = [...configErrors];
-  if (!INFLUXDB_TOKEN) {
-    errors.unshift("INFLUXDB_TOKEN environment variable is required");
+  if (!INFLUXDB_TOKEN && !influxTokenError) {
+    errors.unshift("INFLUXDB_TOKEN environment variable is required (or INFLUXDB_TOKEN_FILE)");
   }
   if (errors.length > 0) {
     for (const error of errors) {
       console.error(`Error: ${error}`);
     }
     process.exit(1);
+  }
+
+  const { protocol, hostname } = new URL(INFLUXDB_URL);
+  if (protocol === "http:" && !isLoopbackHost(hostname)) {
+    console.warn(
+      `INFLUXDB_URL uses plain http:// to ${hostname}; the InfluxDB token is sent unencrypted. Use https://.`,
+    );
   }
 }

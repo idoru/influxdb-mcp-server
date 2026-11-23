@@ -65,10 +65,9 @@ export function parseFluxCsv(text) {
       continue;
     }
 
-    const record = {};
-    current.headers.forEach((header, index) => {
-      record[header] = row[index];
-    });
+    // Object.fromEntries defines own properties, so a column named
+    // "__proto__" is kept as data instead of replacing the prototype
+    const record = Object.fromEntries(current.headers.map((header, index) => [header, row[index]]));
     current.records.push(record);
   }
 

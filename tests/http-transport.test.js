@@ -335,6 +335,21 @@ describe("HTTP transport hardening", () => {
       });
     });
 
+    test("rejects a malformed orgID before calling InfluxDB", async () => {
+      const res = await request(port, {
+        body: {
+          jsonrpc: "2.0",
+          id: 9,
+          method: "tools/call",
+          params: { name: "create-bucket", arguments: { name: "b", orgID: "../../api/v2/orgs" } },
+        },
+      });
+      const rpc = parseRpc(res.text);
+      const message = rpc.error?.message ?? rpc.result.content[0].text;
+      expect(rpc.error || rpc.result.isError).toBeTruthy();
+      expect(message).toContain("16-character hexadecimal");
+    });
+
     test("advertises create-bucket retention as a non-negative integer", async () => {
       const res = await request(port, { body: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} } });
       const tool = parseRpc(res.text).result.tools.find((t) => t.name === "create-bucket");
