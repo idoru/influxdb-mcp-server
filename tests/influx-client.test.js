@@ -29,6 +29,8 @@ describe("influxRequest timeouts", () => {
       INFLUXDB_TOKEN: "test-token",
       DEFAULT_ORG: undefined,
       DEFAULT_BUCKET: undefined,
+      READ_ONLY: false,
+      ENABLE_QUERY_RESOURCE: false,
       validateEnvironment: () => {},
     }));
     ({ influxRequest } = await import("../src/utils/influxClient.js"));

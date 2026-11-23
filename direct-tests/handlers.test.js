@@ -94,6 +94,8 @@ describe("InfluxDB MCP Server Direct Handler Tests", () => {
       INFLUXDB_TOKEN: INFLUXDB_ADMIN_TOKEN,
       DEFAULT_ORG: INFLUXDB_ORG,
       DEFAULT_BUCKET: INFLUXDB_BUCKET,
+      READ_ONLY: false,
+      ENABLE_QUERY_RESOURCE: false,
       validateEnvironment: () => {
         console.log("Mock validateEnvironment called with overridden env vars");
       },

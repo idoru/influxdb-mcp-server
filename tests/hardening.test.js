@@ -28,6 +28,8 @@ describe("Hardening: helpers and resource handlers", () => {
       INFLUXDB_TOKEN: "test-token",
       DEFAULT_ORG: "test-org",
       DEFAULT_BUCKET: undefined,
+      READ_ONLY: false,
+      ENABLE_QUERY_RESOURCE: false,
       validateEnvironment: () => {},
     }));
 

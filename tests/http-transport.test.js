@@ -235,6 +235,12 @@ describe("HTTP transport hardening", () => {
       expect(stderr).toContain('Invalid HTTP port "abc"');
     });
 
+    test("refuses a malformed boolean flag instead of ignoring it", async () => {
+      const { code, stderr } = await runServer(["--http"], { INFLUXDB_READ_ONLY: "1" });
+      expect(code).toBe(1);
+      expect(stderr).toContain('INFLUXDB_READ_ONLY must be "true" or "false"');
+    });
+
     test("refuses to listen on all interfaces without authentication", async () => {
       const { code, stderr } = await runServer(["--http", "--host", "0.0.0.0"]);
       expect(code).toBe(1);
