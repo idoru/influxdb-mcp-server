@@ -1,87 +1,81 @@
-# InfluxDB MCP Server Integration Tests
+# InfluxDB MCP Server Tests
 
-This directory contains a comprehensive integration test suite for the InfluxDB MCP Server. The tests verify that the server correctly interacts with an InfluxDB instance and exposes all the functionality through the Model Context Protocol.
+The test suites check the server's handlers, its Streamable HTTP transport and its behaviour against a real InfluxDB 2.x instance.
 
 ## Prerequisites
 
-- Node.js 20 or higher
-- Docker (for running InfluxDB during tests)
-- npm or yarn
+- Node.js 22 or later
+- npm
+- For the integration suites only: an InfluxDB 2.x instance on a loopback address, or Docker Compose to start one with `scripts/test-influx.sh`
 
 ## Setup
 
-1. Install dependencies:
-
-   ```
-   npm install
-   ```
-
-2. Make sure Docker is running on your system
+```
+npm install
+```
 
 ## Running Tests
 
-To run the integration tests:
-
-```
+```bash
+# Suites that need neither Docker nor InfluxDB (the default)
 npm test
+
+# Integration suites against a throwaway InfluxDB started with Docker Compose
+scripts/test-influx.sh
+
+# Integration suites against an instance you started yourself
+INFLUXDB_TEST_URL=http://127.0.0.1:8086 \
+INFLUXDB_TEST_ADMIN_TOKEN=... \
+INFLUXDB_TEST_ORG=... \
+  npm run test:integration
+
+# Everything (the integration suites are skipped unless INFLUXDB_TEST_* is set)
+npm run test:all
 ```
 
-## What the Tests Cover
+## Suites
 
-The test suite:
+These run with `npm test` and need neither Docker nor InfluxDB:
 
-1. Starts an InfluxDB 2.7 container in Docker
-2. Initializes the database with an organization, bucket, and authentication token
-3. Tests core InfluxDB connectivity directly:
-   - Writing data to InfluxDB
-   - Listing organizations and buckets
-   - Querying measurements in a bucket
-   - Creating new buckets
-4. Tests InfluxDB MCP Server functionality:
-   - Direct server process communication
-   - Testing write-data operations
-   - Testing Flux queries
-   - Verifying prompt content and validity
+- `tests/hardening.test.js` covers the Flux CSV parser, Flux string escaping, URI parameter decoding, HTTP configuration validation (token length, Origin and Host rules, concurrency), and the query/measurements resources against a mocked InfluxDB client
+- `tests/config.test.js` covers `INFLUXDB_URL` validation, `*_FILE` secrets and CLI startup checks
+- `tests/influx-client.test.js` checks InfluxDB request timeouts, response size limits, redirect refusal and error reporting against a local misbehaving HTTP server
+- `tests/http-transport.test.js` runs the Streamable HTTP app in-process and checks Host and Origin validation, bearer authentication, body and concurrency limits, response headers, the access log, JSON-RPC error responses, concurrent stateless requests, and CLI startup/refusal behaviour
+- `tests/tool-schema.test.js` checks advertised tool schemas and annotations, read-only mode and the opt-in query resource
+- `tests/csv-parsing.test.js` covers Flux CSV edge cases in the measurements resource
 
-Three suites run without Docker:
+These run with `npm run test:integration` and need InfluxDB:
 
-- `tests/hardening.test.js` covers the Flux CSV parser, Flux string escaping, URI parameter decoding, HTTP configuration validation, and the query/measurements resources against a mocked InfluxDB client
-- `tests/influx-client.test.js` checks InfluxDB request timeouts (stalled headers and stalled bodies) against a local misbehaving HTTP server
-- `tests/http-transport.test.js` runs the Streamable HTTP app in-process and checks Host header validation (DNS rebinding), bearer authentication, body limits, JSON-RPC error responses, concurrent stateless requests, and CLI startup/refusal behaviour
-
-Run them alone with `npm test -- tests/hardening.test.js tests/http-transport.test.js tests/influx-client.test.js`.
+- `tests/integration.test.js` writes and queries data directly and through the MCP server over stdio, and lists orgs, buckets and measurements
+- `direct-tests/handlers.test.js` calls each resource and tool handler directly
 
 ## Test Environment
 
-The tests use the following configuration:
+The integration suites read the instance from:
 
-- InfluxDB running on port 8086
-- A test organization named "test-org"
-- A test bucket named "test-bucket"
-- A test admin token and a separate token for the MCP server
+- `INFLUXDB_TEST_URL`: loopback URL such as `http://127.0.0.1:8086`. Remote URLs are refused, because the suites write data and create and delete buckets and orgs with an admin token
+- `INFLUXDB_TEST_ADMIN_TOKEN`: operator token for that instance
+- `INFLUXDB_TEST_ORG`: organization created at setup
 
-## Automatic Cleanup
+Without these variables the suites are skipped. Set `REQUIRE_INFLUX_TESTS=1` (as CI does) to make that a failure instead.
 
-After the tests complete, the suite:
+`scripts/test-influx.sh` starts `docker-compose.test.yml` as the `influxdb-mcp-test` Compose project: a digest-pinned `influxdb:2.7`, published on `127.0.0.1` only, with random credentials and data on tmpfs. It removes that project when the run ends. In CI the same image runs as a GitHub Actions service container.
 
-1. Cleans up any spawned server processes
-2. Stops and removes the InfluxDB Docker container
-3. Performs additional cleanup of any leftover Docker containers
+## Cleanup
 
-## Note on Docker Usage
+The tests never use the Docker API and never stop, kill or remove anything they did not create:
 
-The integration tests require Docker to be installed and running on your system. Make sure you have proper permissions to create and manage Docker containers before running the tests.
+- Each run creates its own bucket, and every bucket or org it creates carries a per-run ID in its name. `afterAll` deletes only those
+- MCP server processes started by a test are tracked and stopped by that test
 
 ## Running Individual Tests
-
-You can run specific tests to isolate issues:
 
 ```bash
 # Run a single test by name
 npm test -- -t "should list organizations"
 
-# Skip integration tests
-npm test -- --testPathIgnorePatterns=integration.test.js
+# Run one suite
+npm test -- tests/http-transport.test.js
 ```
 
 ## Testing Approaches
@@ -89,7 +83,7 @@ npm test -- --testPathIgnorePatterns=integration.test.js
 The project now uses multiple testing approaches to ensure functionality and stability:
 
 1. **Integration Tests** (`tests/integration.test.js`):
-   - End-to-end tests that use Docker to run a real InfluxDB instance
+   - End-to-end tests against a real InfluxDB instance
    - Tests both direct API calls and MCP client interactions
    - Contains robust cleanup to prevent hanging processes
 
@@ -115,7 +109,7 @@ The direct API testing approach focuses on verifying the core functionality with
 For testing server functionality directly, we use:
 - Child process spawning with controlled environment variables
 - Direct HTTP fetch calls to InfluxDB API endpoints
-- Code scanning to validate prompt content
+- Direct imports of the prompt functions to validate prompt content
 
 ## Troubleshooting Guide
 
@@ -158,10 +152,8 @@ During development, we encountered several challenges with testing the MCP serve
 
 #### 1. Port conflicts
 
-- **Problem**: "Port is already allocated" errors occur when Docker tries to start InfluxDB on a port already in use.
-- **Solution**:
-  - Use a randomized port for InfluxDB containers to avoid conflicts (implemented)
-  - Clean up any lingering Docker containers using `docker ps -a` and `docker rm`
+- **Problem**: `scripts/test-influx.sh` cannot publish InfluxDB because port 8086 is already in use.
+- **Solution**: Run it with another port, e.g. `INFLUXDB_TEST_PORT=18086 scripts/test-influx.sh`. If an earlier run was interrupted, remove only its project with `docker compose -p influxdb-mcp-test down --volumes`.
 
 #### 2. MCP client connection issues
 
@@ -184,21 +176,18 @@ During development, we encountered several challenges with testing the MCP serve
   - Implement proper error propagation so issues are visible rather than silent
   - Run tests in series with `--runInBand` option to avoid race conditions
 
-#### 4. Docker resource cleanup
+#### 4. Leftover test resources
 
-- **Problem**: Docker containers aren't properly cleaned up, leading to resource leaks.
-- **Solution**:
-  - Implement a robust `afterAll()` that cleans up all resources regardless of test success/failure
-  - Add container ID logging for better debugging
-  - Forcefully remove any leftover test containers
+- **Problem**: An interrupted run leaves `test-...-<run id>` buckets or orgs behind on a long-lived instance.
+- **Solution**: Delete them by name in the InfluxDB UI or API. The tests only ever delete resources carrying their own run ID, so they will not remove these automatically.
 
 ### Advanced Debugging
 
 When tests are failing:
 
 1. Add detailed logging throughout your server implementation
-2. Check Docker container status: `docker ps -a`
-3. View detailed logs from containers: `docker logs <container-id>`
+2. Check the test instance: `docker compose -p influxdb-mcp-test ps`
+3. View its logs: `docker compose -p influxdb-mcp-test logs influxdb`
 4. Run tests with increased verbosity: `npm test -- --verbose`
 5. Check if ports are in use: `lsof -i :<port>`
 6. Inspect network traffic for API authorization issues: look for 401/403 errors
