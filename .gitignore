@@ -4,3 +4,4 @@ build/
 .env*
 .aider*
 .npmrc
+.DS_Store
