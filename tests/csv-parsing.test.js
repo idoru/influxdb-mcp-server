@@ -21,6 +21,9 @@ describe("CSV Parsing Edge Cases - Issue #8", () => {
       INFLUXDB_URL: "http://localhost:8086",
       INFLUXDB_TOKEN: "test-token",
       DEFAULT_ORG: "test-org",
+      MAX_RESPONSE_BYTES: 10 * 1024 * 1024,
+      READ_ONLY: false,
+      ENABLE_QUERY_RESOURCE: false,
       validateEnvironment: () => {},
     }));
 
@@ -237,3 +240,17 @@ describe("CSV Parsing Edge Cases - Issue #8", () => {
     console.log("✓ Successfully trimmed whitespace from values");
   });
 });
+
+describe("Flux CSV records", () => {
+  test("keeps a __proto__ column as data without touching the prototype", async () => {
+    const { parseFluxCsv } = await import("../src/utils/csv.js");
+    const [table] = parseFluxCsv(",result,__proto__\r\n,_result,polluted\r\n");
+    const [record] = table.records;
+
+    expect(Object.getPrototypeOf(record)).toBe(Object.prototype);
+    expect(Object.hasOwn(record, "__proto__")).toBe(true);
+    expect(JSON.parse(JSON.stringify(record))).toEqual({ "": "", result: "_result", ["__proto__"]: "polluted" });
+    expect({}.polluted).toBeUndefined();
+  });
+});
+

@@ -3,3 +3,5 @@ build/
 *.log
 .env*
 .aider*
+.npmrc
+.DS_Store

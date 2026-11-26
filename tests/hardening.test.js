@@ -1,6 +1,9 @@
 import { jest } from "@jest/globals";
+import { takeConsoleCalls } from "./support/console.js";
 
 jest.setTimeout(10000);
+
+const STRONG_TOKEN = "0123456789abcdef0123456789abcdef";
 
 // Unit tests for the parsing, escaping and configuration helpers, plus the
 // query/measurements resources against a mocked InfluxDB client.
@@ -28,6 +31,9 @@ describe("Hardening: helpers and resource handlers", () => {
       INFLUXDB_TOKEN: "test-token",
       DEFAULT_ORG: "test-org",
       DEFAULT_BUCKET: undefined,
+      MAX_RESPONSE_BYTES: 10 * 1024 * 1024,
+      READ_ONLY: false,
+      ENABLE_QUERY_RESOURCE: false,
       validateEnvironment: () => {},
     }));
 
@@ -117,7 +123,9 @@ describe("Hardening: helpers and resource handlers", () => {
         host: "127.0.0.1",
         authToken: undefined,
         allowedHosts: ["localhost", "127.0.0.1", "[::1]"],
+        allowedOrigins: [],
         bodyLimit: "4mb",
+        maxConcurrent: 32,
       });
     });
 
@@ -136,18 +144,60 @@ describe("Hardening: helpers and resource handlers", () => {
     });
 
     test("allows non-loopback hosts with MCP_AUTH_TOKEN", () => {
-      const config = resolveHttpConfig({ http: true }, { MCP_HTTP_HOST: "0.0.0.0", MCP_AUTH_TOKEN: "secret" });
+      const config = resolveHttpConfig({ http: true }, { MCP_HTTP_HOST: "0.0.0.0", MCP_AUTH_TOKEN: STRONG_TOKEN });
       expect(config.host).toBe("0.0.0.0");
-      expect(config.authToken).toBe("secret");
+      expect(config.authToken).toBe(STRONG_TOKEN);
       expect(config.allowedHosts).toBeNull();
     });
 
-    test("allows explicitly unauthenticated non-loopback hosts", () => {
+    test("rejects auth tokens shorter than 32 characters", () => {
+      expect(() => resolveHttpConfig({ http: true }, { MCP_AUTH_TOKEN: "secret" })).toThrow("at least 32 characters");
+      expect(() => resolveHttpConfig({ http: true }, { MCP_AUTH_TOKEN: "x".repeat(31) })).toThrow(
+        "at least 32 characters",
+      );
+      expect(resolveHttpConfig({ http: true }, { MCP_AUTH_TOKEN: "x".repeat(32) }).authToken).toHaveLength(32);
+    });
+
+    test("refuses unauthenticated non-loopback hosts without MCP_ALLOWED_HOSTS", () => {
+      expect(() =>
+        resolveHttpConfig({ http: true, host: "0.0.0.0" }, { MCP_HTTP_ALLOW_UNAUTHENTICATED: "true" }),
+      ).toThrow(/without authentication or MCP_ALLOWED_HOSTS/);
+      expect(() =>
+        resolveHttpConfig(
+          { http: true, host: "0.0.0.0" },
+          { MCP_HTTP_ALLOW_UNAUTHENTICATED: "true", MCP_ALLOWED_HOSTS: " , " },
+        ),
+      ).toThrow(/without authentication or MCP_ALLOWED_HOSTS/);
+    });
+
+    test("allows explicitly unauthenticated non-loopback hosts with MCP_ALLOWED_HOSTS", () => {
       const config = resolveHttpConfig(
         { http: true, host: "0.0.0.0" },
-        { MCP_HTTP_ALLOW_UNAUTHENTICATED: "true" },
+        { MCP_HTTP_ALLOW_UNAUTHENTICATED: "true", MCP_ALLOWED_HOSTS: "mcp.internal" },
       );
       expect(config.allowUnauthenticated).toBe(true);
+      expect(config.allowedHosts).toEqual(["mcp.internal"]);
+    });
+
+    test("normalizes MCP_ALLOWED_ORIGINS and rejects non-origin entries", () => {
+      expect(
+        resolveHttpConfig({ http: true }, { MCP_ALLOWED_ORIGINS: " HTTPS://App.Example.com/ , http://localhost:6274" })
+          .allowedOrigins,
+      ).toEqual(["https://app.example.com", "http://localhost:6274"]);
+      for (const bad of ["https://app.example.com/path", "app.example.com", "null", "*"]) {
+        expect(() => resolveHttpConfig({ http: true }, { MCP_ALLOWED_ORIGINS: bad })).toThrow(
+          "Invalid MCP_ALLOWED_ORIGINS entry",
+        );
+      }
+    });
+
+    test("parses MCP_HTTP_MAX_CONCURRENT", () => {
+      expect(resolveHttpConfig({ http: true }, { MCP_HTTP_MAX_CONCURRENT: "4" }).maxConcurrent).toBe(4);
+      for (const bad of ["0", "-1", "many", "2.5"]) {
+        expect(() => resolveHttpConfig({ http: true }, { MCP_HTTP_MAX_CONCURRENT: bad })).toThrow(
+          "Invalid MCP_HTTP_MAX_CONCURRENT",
+        );
+      }
     });
 
     test("normalizes MCP_ALLOWED_HOSTS and IPv6 bind hosts", () => {
@@ -202,7 +252,7 @@ describe("Hardening: helpers and resource handlers", () => {
       const result = await executeQuery(uri, { orgName: "test-org", fluxQuery: encodeURIComponent(query) });
       const body = JSON.parse(result.contents[0].text);
 
-      expect(result.error).toBeUndefined();
+      expect(body.error).toBeUndefined();
       expect(body.query).toBe(query);
       expect(body.headers).toEqual(["", "result", "table", "host", "_value", "region"]);
       expect(body.data).toEqual([
@@ -227,6 +277,7 @@ describe("Hardening: helpers and resource handlers", () => {
       const result = await executeQuery(new URL("influxdb://query/o/q"), { orgName: "o", fluxQuery: "50%" });
       expect(JSON.parse(result.contents[0].text).error).toContain("Invalid percent-encoding in fluxQuery");
       expect(mockInfluxRequest).not.toHaveBeenCalled();
+      expect(takeConsoleCalls("error")).toEqual(["Error in query resource: Invalid percent-encoding in fluxQuery"]);
     });
   });
 

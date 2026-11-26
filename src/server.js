@@ -3,7 +3,7 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { z } from "zod";
 
 // Import config
-import { DEFAULT_ORG, DEFAULT_BUCKET } from "./config/env.js";
+import { DEFAULT_ORG, DEFAULT_BUCKET, ENABLE_QUERY_RESOURCE, READ_ONLY } from "./config/env.js";
 
 // Import resource handlers
 import { listOrganizations } from "./handlers/organizationsHandler.js";
@@ -28,6 +28,9 @@ const { version } = createRequire(import.meta.url)("../package.json");
 const withEnvDefault = (schema, envDefault) =>
   envDefault ? schema.optional() : schema;
 
+// Upper bound for bucket retention (about 100 years)
+const MAX_RETENTION_SECONDS = 100 * 365 * 24 * 60 * 60;
+
 // Create and configure a new MCP server instance
 export const createMcpServer = () => {
   const server = new McpServer({
@@ -45,112 +48,168 @@ export const createMcpServer = () => {
     }),
     bucketMeasurements,
   );
-  server.resource(
-    "query",
-    new ResourceTemplate("influxdb://query/{orgName}/{fluxQuery}", {
-      list: undefined,
-    }),
-    executeQuery,
-  );
+  // Opt-in: a resource read runs arbitrary Flux, which can write (to()) or
+  // reach other systems (http, sql), and clients may not ask for approval first
+  if (ENABLE_QUERY_RESOURCE) {
+    server.resource(
+      "query",
+      new ResourceTemplate("influxdb://query/{orgName}/{fluxQuery}", {
+        list: undefined,
+      }),
+      executeQuery,
+    );
+  }
 
-  // Register tools
-  server.tool(
-    "write-data",
-    `Stream newline-delimited line protocol records into a bucket. Use this after composing measurements so the LLM can insert real telemetry, optionally controlling timestamp precision.${DEFAULT_ORG ? ` Default org: "${DEFAULT_ORG}".` : ""}${DEFAULT_BUCKET ? ` Default bucket: "${DEFAULT_BUCKET}".` : ""}`,
-    {
-      org: withEnvDefault(
-        z
-          .string()
-          .describe(
-            `Human-readable organization name that owns the destination bucket (the same value returned by the orgs resource).${DEFAULT_ORG ? ` Defaults to "${DEFAULT_ORG}" if omitted.` : ""}`,
+  // Register tools. Annotations are hints that let clients decide when to ask
+  // for approval; they are deliberately conservative.
+  if (!READ_ONLY) {
+    server.registerTool(
+      "write-data",
+      {
+        title: "Write data",
+        description: `Stream newline-delimited line protocol records into a bucket. Use this after composing measurements so the LLM can insert real telemetry, optionally controlling timestamp precision.${DEFAULT_ORG ? ` Default org: "${DEFAULT_ORG}".` : ""}${DEFAULT_BUCKET ? ` Default bucket: "${DEFAULT_BUCKET}".` : ""}`,
+        inputSchema: {
+          org: withEnvDefault(
+            z
+              .string()
+              .describe(
+                `Human-readable organization name that owns the destination bucket (the same value returned by the orgs resource).${DEFAULT_ORG ? ` Defaults to "${DEFAULT_ORG}" if omitted.` : ""}`,
+              ),
+            DEFAULT_ORG,
           ),
-        DEFAULT_ORG,
-      ),
-      bucket: withEnvDefault(
-        z
-          .string()
-          .describe(
-            `Bucket name to receive the points.${DEFAULT_BUCKET ? ` Defaults to "${DEFAULT_BUCKET}" if omitted.` : " Make sure it already exists or call create-bucket first."}`,
+          bucket: withEnvDefault(
+            z
+              .string()
+              .describe(
+                `Bucket name to receive the points.${DEFAULT_BUCKET ? ` Defaults to "${DEFAULT_BUCKET}" if omitted.` : " Make sure it already exists or call create-bucket first."}`,
+              ),
+            DEFAULT_BUCKET,
           ),
-        DEFAULT_BUCKET,
-      ),
-      data: z
-        .string()
-        .describe(
-          "Payload containing one or more line protocol lines (measurements, tags, fields, timestamps) separated by newlines.",
-        ),
-      precision: z
-        .enum(["ns", "us", "ms", "s"])
-        .optional()
-        .describe(
-          "Optional timestamp precision. Provide it only when the line protocol omits unit suffix context; defaults to nanoseconds.",
-        ),
-    },
-    writeData,
-  );
-  server.tool(
+          data: z
+            .string()
+            .describe(
+              "Payload containing one or more line protocol lines (measurements, tags, fields, timestamps) separated by newlines.",
+            ),
+          precision: z
+            .enum(["ns", "us", "ms", "s"])
+            .optional()
+            .describe(
+              "Optional timestamp precision. Provide it only when the line protocol omits unit suffix context; defaults to nanoseconds.",
+            ),
+        },
+        // A point with the same series and timestamp overwrites existing fields
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      writeData,
+    );
+  }
+
+  server.registerTool(
     "query-data",
-    `Execute a Flux query inside an organization to inspect measurement schemas, run aggregations, or validate recently written data.${DEFAULT_ORG ? ` Default org: "${DEFAULT_ORG}".` : ""}`,
     {
-      org: withEnvDefault(
-        z
+      title: "Query data",
+      description: `Execute a Flux query inside an organization to inspect measurement schemas, run aggregations, or validate recently written data.${DEFAULT_ORG ? ` Default org: "${DEFAULT_ORG}".` : ""}${READ_ONLY ? " The server is in read-only mode; Flux queries can still write (to()) unless the InfluxDB token is read-only." : ""}`,
+      inputSchema: {
+        org: withEnvDefault(
+          z
+            .string()
+            .describe(
+              `Organization whose buckets the query should target (exact name, not ID).${DEFAULT_ORG ? ` Defaults to "${DEFAULT_ORG}" if omitted.` : ""}`,
+            ),
+          DEFAULT_ORG,
+        ),
+        query: z
           .string()
           .describe(
-            `Organization whose buckets the query should target (exact name, not ID).${DEFAULT_ORG ? ` Defaults to "${DEFAULT_ORG}" if omitted.` : ""}`,
+            "Flux query text. Multi-line strings are supported; results are returned as annotated CSV for easy parsing.",
           ),
-        DEFAULT_ORG,
-      ),
-      query: z
-        .string()
-        .describe(
-          "Flux query text. Multi-line strings are supported; results are returned as annotated CSV for easy parsing.",
-        ),
+      },
+      // Flux can overwrite points (to()) and reach other systems (http, sql)
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
     },
     queryData,
   );
-  server.tool(
-    "create-bucket",
-    "Provision a new bucket under an organization so that subsequent write-data calls have a destination.",
-    {
-      name: z
-        .string()
-        .describe(
-          "Friendly bucket name. Follow InfluxDB naming rules (alphanumeric, dashes, underscores).",
-        ),
-      orgID: z
-        .string()
-        .describe(
-          "Organization ID (UUID) that will own the bucket. Retrieve it from the organizations resource or create-org output.",
-        ),
-      retentionPeriodSeconds: z
-        .number()
-        .int()
-        .nonnegative()
-        .optional()
-        .describe(
-          "Optional retention duration expressed in whole seconds. Omit (or pass 0) for infinite retention.",
-        ),
-    },
-    createBucket,
-  );
-  server.tool(
-    "create-org",
-    "Create a brand-new organization to isolate users or projects before generating buckets and tokens.",
-    {
-      name: z
-        .string()
-        .describe(
-          "Display name for the organization as it should appear in InfluxDB Cloud/OSS.",
-        ),
-      description: z
-        .string()
-        .optional()
-        .describe(
-          "Optional free-form description that helps humans understand why the org exists.",
-        ),
-    },
-    createOrg,
-  );
+
+  if (!READ_ONLY) {
+    server.registerTool(
+      "create-bucket",
+      {
+        title: "Create bucket",
+        description: "Provision a new bucket under an organization so that subsequent write-data calls have a destination.",
+        inputSchema: {
+          name: z
+            .string()
+            .min(1)
+            .max(255)
+            .describe(
+              "Friendly bucket name. Follow InfluxDB naming rules (alphanumeric, dashes, underscores).",
+            ),
+          orgID: z
+            .string()
+            .regex(/^[0-9a-f]{16}$/, "orgID must be a 16-character hexadecimal InfluxDB ID")
+            .describe(
+              "Organization ID (16 hexadecimal characters) that will own the bucket. Retrieve it from the organizations resource or create-org output.",
+            ),
+          retentionPeriodSeconds: z
+            .number()
+            .int()
+            .nonnegative()
+            .max(MAX_RETENTION_SECONDS)
+            .optional()
+            .describe(
+              "Optional retention duration expressed in whole seconds. Omit (or pass 0) for infinite retention.",
+            ),
+        },
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      createBucket,
+    );
+    server.registerTool(
+      "create-org",
+      {
+        title: "Create organization",
+        description: "Create a brand-new organization to isolate users or projects before generating buckets and tokens.",
+        inputSchema: {
+          name: z
+            .string()
+            .min(1)
+            .max(255)
+            .describe(
+              "Display name for the organization as it should appear in InfluxDB Cloud/OSS.",
+            ),
+          description: z
+            .string()
+            .max(1024)
+            .optional()
+            .describe(
+              "Optional free-form description that helps humans understand why the org exists.",
+            ),
+        },
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
+      },
+      createOrg,
+    );
+  }
 
   // Register prompts
   server.prompt("flux-query-examples", {}, fluxQueryExamplesPrompt);
