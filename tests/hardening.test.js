@@ -1,4 +1,5 @@
 import { jest } from "@jest/globals";
+import { takeConsoleCalls } from "./support/console.js";
 
 jest.setTimeout(10000);
 
@@ -251,7 +252,7 @@ describe("Hardening: helpers and resource handlers", () => {
       const result = await executeQuery(uri, { orgName: "test-org", fluxQuery: encodeURIComponent(query) });
       const body = JSON.parse(result.contents[0].text);
 
-      expect(result.error).toBeUndefined();
+      expect(body.error).toBeUndefined();
       expect(body.query).toBe(query);
       expect(body.headers).toEqual(["", "result", "table", "host", "_value", "region"]);
       expect(body.data).toEqual([
@@ -276,6 +277,7 @@ describe("Hardening: helpers and resource handlers", () => {
       const result = await executeQuery(new URL("influxdb://query/o/q"), { orgName: "o", fluxQuery: "50%" });
       expect(JSON.parse(result.contents[0].text).error).toContain("Invalid percent-encoding in fluxQuery");
       expect(mockInfluxRequest).not.toHaveBeenCalled();
+      expect(takeConsoleCalls("error")).toEqual(["Error in query resource: Invalid percent-encoding in fluxQuery"]);
     });
   });
 

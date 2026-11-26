@@ -1,30 +1,11 @@
 import { jest } from "@jest/globals";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { withMcpClient } from "./support/mcp.js";
 
 jest.setTimeout(15000);
 
 // Spawn the server over stdio with the given env and run fn against a client.
 // No InfluxDB instance is needed: listing tools and resources never hits the API.
-async function withClient(extraEnv, fn) {
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: ["src/index.js"],
-    env: {
-      PATH: process.env.PATH,
-      INFLUXDB_TOKEN: "test-token",
-      ...extraEnv,
-    },
-    stderr: "ignore",
-  });
-  const client = new Client({ name: "schema-test", version: "1.0.0" });
-  await client.connect(transport);
-  try {
-    return await fn(client);
-  } finally {
-    await client.close();
-  }
-}
+const withClient = (extraEnv, fn) => withMcpClient({ INFLUXDB_TOKEN: "test-token", ...extraEnv }, fn);
 
 // Return the server's tools keyed by name
 async function listToolsWithEnv(extraEnv) {

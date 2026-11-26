@@ -14,6 +14,8 @@
 import { randomBytes } from "node:crypto";
 import { describe } from "@jest/globals";
 import { isLoopbackHost } from "../../src/config/http.js";
+import { parseFluxCsv } from "../../src/utils/csv.js";
+import { fluxString } from "../../src/utils/flux.js";
 
 const url = process.env.INFLUXDB_TEST_URL?.trim().replace(/\/+$/, "");
 const adminToken = process.env.INFLUXDB_TEST_ADMIN_TOKEN;
@@ -80,9 +82,68 @@ export async function waitForInfluxDBReady(timeoutMs = 30000) {
   }
 }
 
+// GET an API path and return the parsed JSON, failing on any error status
+export async function getJson(path) {
+  return expectOk(await influxApi(path), `GET ${path}`);
+}
+
 export async function getOrgId() {
-  const data = await expectOk(await influxApi(`/api/v2/orgs?org=${encodeURIComponent(org)}`), "Org lookup");
+  const data = await getJson(`/api/v2/orgs?${new URLSearchParams({ org })}`);
   return data.orgs[0].id;
+}
+
+// Write line protocol to a bucket in the test org
+export async function writeLines(bucket, lines, precision = "ms") {
+  const params = new URLSearchParams({ org, bucket, precision });
+  await expectOk(
+    await influxApi(`/api/v2/write?${params}`, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+      body: lines,
+    }),
+    `Writing to ${bucket}`,
+  );
+}
+
+// Two cpu_usage series (server01, server02) and two temperature series
+export async function writeSampleData(bucket) {
+  const now = Date.now();
+  await writeLines(
+    bucket,
+    [
+      `cpu_usage,host=server01,region=us-west cpu=64.2,mem=47.3 ${now}`,
+      `cpu_usage,host=server02,region=us-east cpu=72.1,mem=52.8 ${now}`,
+      `temperature,location=datacenter,sensor=rack1 value=24.5 ${now}`,
+      `temperature,location=datacenter,sensor=rack2 value=25.1 ${now}`,
+    ].join("\n"),
+  );
+}
+
+// Flux selecting one measurement (and optionally tag values) from a bucket over the last hour
+export function measurementFlux(bucket, measurement, tags = {}) {
+  const filters = Object.entries(tags).map(([key, value]) => ` and r.${key} == ${fluxString(value)}`);
+  return `from(bucket: ${fluxString(bucket)})
+  |> range(start: -1h)
+  |> filter(fn: (r) => r._measurement == ${fluxString(measurement)}${filters.join("")})`;
+}
+
+// The records of every table in an annotated CSV response
+export const csvRecords = (csv) => parseFluxCsv(csv).flatMap((table) => table.records);
+
+// Field name to value for a single point, e.g. { cpu: "82.5", memory: "65.2" }
+export const fieldValues = (csv) =>
+  Object.fromEntries(csvRecords(csv).map((record) => [record._field, record._value]));
+
+// Run a Flux query in the test org and return the annotated CSV
+export async function queryCsv(flux) {
+  const response = await influxApi(`/api/v2/query?${new URLSearchParams({ org })}`, {
+    method: "POST",
+    body: JSON.stringify({ query: flux, type: "flux" }),
+  });
+  if (!response.ok) {
+    throw new Error(`Query failed (${response.status}): ${await response.text()}`);
+  }
+  return response.text();
 }
 
 // Create a bucket named uniqueName(label) in the test org and return its name
@@ -110,16 +171,21 @@ async function listAll(kind) {
 }
 
 // Delete the buckets and orgs this run created (names containing RUN_ID).
-// Nothing else on the instance is touched.
+// Nothing else on the instance is touched. Every deletion is attempted, then
+// any failure is thrown, so a suite whose cleanup fails does not pass.
 export async function deleteRunResources() {
+  const failures = [];
   for (const kind of ["buckets", "orgs"]) {
     for (const item of await listAll(kind)) {
       if (!item.name.includes(RUN_ID)) continue;
       const response = await influxApi(`/api/v2/${kind}/${item.id}`, { method: "DELETE" });
       // A bucket may already be gone with its org
       if (!response.ok && response.status !== 404) {
-        console.error(`Could not delete ${kind} ${item.name}: ${response.status}`);
+        failures.push(`${kind} ${item.name}: ${response.status} ${await response.text()}`);
       }
     }
+  }
+  if (failures.length > 0) {
+    throw new Error(`Could not delete this run's test resources:\n${failures.join("\n")}`);
   }
 }

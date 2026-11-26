@@ -42,11 +42,12 @@ These run with `npm test` and need neither Docker nor InfluxDB:
 - `tests/influx-client.test.js` checks InfluxDB request timeouts, response size limits, redirect refusal and error reporting against a local misbehaving HTTP server
 - `tests/http-transport.test.js` runs the Streamable HTTP app in-process and checks Host and Origin validation, bearer authentication, body and concurrency limits, response headers, the access log, JSON-RPC error responses, concurrent stateless requests, and CLI startup/refusal behaviour
 - `tests/tool-schema.test.js` checks advertised tool schemas and annotations, read-only mode and the opt-in query resource
+- `tests/prompts.test.js` fetches both prompts through the server and checks their content
 - `tests/csv-parsing.test.js` covers Flux CSV edge cases in the measurements resource
 
 These run with `npm run test:integration` and need InfluxDB:
 
-- `tests/integration.test.js` writes and queries data directly and through the MCP server over stdio, and lists orgs, buckets and measurements
+- `tests/integration.test.js` runs the MCP server over stdio, through the SDK client and with raw JSON-RPC, and checks every tool and resource against the InfluxDB API, which it also exercises directly as a baseline
 - `direct-tests/handlers.test.js` calls each resource and tool handler directly
 
 ## Test Environment
@@ -65,8 +66,8 @@ Without these variables the suites are skipped. Set `REQUIRE_INFLUX_TESTS=1` (as
 
 The tests never use the Docker API and never stop, kill or remove anything they did not create:
 
-- Each run creates its own bucket, and every bucket or org it creates carries a per-run ID in its name. `afterAll` deletes only those
-- MCP server processes started by a test are tracked and stopped by that test
+- Each run creates its own bucket, and every bucket or org it creates carries a per-run ID in its name. `afterAll` deletes only those, and fails the suite if any deletion fails
+- MCP server processes started by a test are stopped by that test
 
 ## Running Individual Tests
 
@@ -76,40 +77,36 @@ npm test -- -t "should list organizations"
 
 # Run one suite
 npm test -- tests/http-transport.test.js
+
+# Run a single integration test against a throwaway InfluxDB
+scripts/test-influx.sh -t "should list buckets - MCP client"
 ```
+
+Every test can run on its own: the integration suites write their sample data in `beforeAll`.
 
 ## Testing Approaches
 
-The project now uses multiple testing approaches to ensure functionality and stability:
+1. **Integration tests** (`tests/integration.test.js`):
+   - Run the MCP server over stdio against a real InfluxDB, through the SDK client, and once with raw newline-delimited JSON-RPC, which also checks that stdout carries nothing but JSON-RPC
+   - Verify each tool's effect through the InfluxDB API, by the ID the tool reports where it reports one
+   - Exercise the InfluxDB API directly as a baseline, so a failure points at either the server or the instance
 
-1. **Integration Tests** (`tests/integration.test.js`):
-   - End-to-end tests against a real InfluxDB instance
-   - Tests both direct API calls and MCP client interactions
-   - Contains robust cleanup to prevent hanging processes
+2. **Direct handler tests** (`direct-tests/handlers.test.js`):
+   - Call each handler function directly, without the MCP protocol, with `src/config/env.js` mocked
 
-2. **Direct Handler Tests** (`direct-tests/handlers.test.js`):
-   - Tests each handler function directly without MCP protocol overhead
-   - Validates that the individual handlers work correctly with InfluxDB
-   - Uses environment variable mocking to ensure proper test isolation
+3. **Tool schema and prompt tests** (`tests/tool-schema.test.js`, `tests/prompts.test.js`):
+   - Spawn the server over stdio and inspect the advertised tools, resources and prompts
+   - Need neither Docker nor InfluxDB
 
-3. **Tool Schema Tests** (`tests/tool-schema.test.js`):
-   - Spawns the server over stdio with different `INFLUXDB_ORG` / `INFLUXDB_BUCKET` settings and inspects the advertised tool schemas
-   - Verifies `org`/`bucket` are only optional when a matching env default is configured
-   - Does not require Docker or a running InfluxDB instance
+## Writing Tests
 
-### Direct Testing Advantages
+A test must fail whenever the behaviour it names is broken:
 
-The direct API testing approach focuses on verifying the core functionality without depending on the MCP client. This approach has several advantages:
-
-1. **Isolates Test Concerns**: Separates InfluxDB connectivity testing from MCP client/server communication issues
-2. **More Reliable Tests**: Reduces dependency on the MCP client, which can have its own reliability challenges
-3. **Better Error Visibility**: Makes it easier to diagnose exactly where issues occur in the stack
-4. **Faster Execution**: Direct API calls are typically faster than going through the full MCP stack
-
-For testing server functionality directly, we use:
-- Child process spawning with controlled environment variables
-- Direct HTTP fetch calls to InfluxDB API endpoints
-- Direct imports of the prompt functions to validate prompt content
+- No fallbacks, retries or conditional assertions. An MCP test never falls back to the InfluxDB API, and never skips an assertion because a result has an unexpected shape.
+- Tool results carry `isError`, not `error`. Read them with `toolText()` from `tests/support/mcp.js`, which fails on `isError`, and assert the exact reply. Read resources with `resourceJson()`, which fails when the resource reports an `error`.
+- Check side effects through the InfluxDB API by ID or name filter, not by scanning the first page of a list.
+- Start servers with `withMcpClient()`. It passes only `PATH` and the variables the test gives, so shell settings such as `DEBUG` or `INFLUXDB_READ_ONLY` cannot change the result. It prints the server's stderr only when the test fails, and always stops the server.
+- `tests/support/console-guard.js` fails any test that logs to `console.error` or `console.warn`. A test that expects such a message takes it with `takeConsoleCalls()` from `tests/support/console.js` and asserts on it.
 
 ## Troubleshooting Guide
 
@@ -157,24 +154,19 @@ During development, we encountered several challenges with testing the MCP serve
 
 #### 2. MCP client connection issues
 
-- **Problem**: The MCP client struggles to connect to the server or times out during operations.
+- **Problem**: An MCP test fails to connect to the server, or a request fails.
 - **Solution**:
-  - For testing, use the direct API approach implemented in the current tests
-  - When MCP client is needed:
-    - Check authorization tokens are correct and have sufficient permissions
-    - Add proper error handling with detailed logging
-    - Implement connection validation and reconnection logic
-    - Add appropriate timeout handling using AbortController
-    - Consider opening an issue with the MCP SDK if problems persist
+  - Read the server stderr printed above the failure; it usually names the cause, such as a refused configuration or an InfluxDB error
+  - Check that the token is correct and has sufficient permissions
+  - Reproduce by running `node src/index.js` with the same variables
+  - Do not add retries or fall back to the InfluxDB API: the test must fail when the server does
 
 #### 3. Test hanging
 
-- **Problem**: Tests hang after showing "Sample data written successfully" with no progress.
+- **Problem**: A test makes no progress.
 - **Solution**:
-  - Add detailed logging for each step of the test process
-  - Use AbortController with fetch operations to ensure proper cancellation
-  - Implement proper error propagation so issues are visible rather than silent
-  - Run tests in series with `--runInBand` option to avoid race conditions
+  - MCP requests in tests time out after 15 seconds (`REQUEST_OPTIONS` in `tests/support/mcp.js`) and InfluxDB API calls after 10 seconds, each with an error naming the request
+  - Run tests in series with `--runInBand` (the npm scripts already do) to avoid race conditions
 
 #### 4. Leftover test resources
 
@@ -185,7 +177,7 @@ During development, we encountered several challenges with testing the MCP serve
 
 When tests are failing:
 
-1. Add detailed logging throughout your server implementation
+1. Run the server by hand with `DEBUG=mcp:*` to see full MCP messages. Never enable it in tests or by default: it logs query text and written data
 2. Check the test instance: `docker compose -p influxdb-mcp-test ps`
 3. View its logs: `docker compose -p influxdb-mcp-test logs influxdb`
 4. Run tests with increased verbosity: `npm test -- --verbose`

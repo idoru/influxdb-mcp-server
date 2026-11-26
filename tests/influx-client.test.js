@@ -1,5 +1,6 @@
 import { jest } from "@jest/globals";
 import http from "node:http";
+import { takeConsoleCalls } from "./support/console.js";
 
 jest.setTimeout(10000);
 
@@ -73,6 +74,9 @@ describe("influxRequest timeouts and limits", () => {
 
   test("times out when response headers never arrive", async () => {
     await expect(influxRequest("/headers-hang", {}, 200)).rejects.toThrow("timed out after 200ms");
+    expect(takeConsoleCalls("error")).toEqual([
+      expect.stringMatching(/^Error in influxRequest GET http:\/\/127\.0\.0\.1:\d+\/headers-hang: /),
+    ]);
   });
 
   test("times out when the response body stalls", async () => {
@@ -108,6 +112,9 @@ describe("influxRequest timeouts and limits", () => {
 
   test("refuses to follow redirects", async () => {
     await expect(influxRequest("/redirect", {}, 2000)).rejects.toThrow("redirect, which is not followed");
+    expect(takeConsoleCalls("error")).toEqual([
+      expect.stringMatching(/^Error in influxRequest GET http:\/\/127\.0\.0\.1:\d+\/redirect: /),
+    ]);
   });
 
   test("truncates long error bodies", async () => {
@@ -120,5 +127,9 @@ describe("influxRequest timeouts and limits", () => {
     const error = await influxRequest("/reset", {}, 2000).catch((e) => e);
     expect(error.message).toMatch(/^Could not reach InfluxDB/);
     expect(error.message).not.toContain("127.0.0.1");
+    // The URL goes to the server's own log only
+    expect(takeConsoleCalls("error")).toEqual([
+      expect.stringMatching(/^Error in influxRequest GET http:\/\/127\.0\.0\.1:\d+\/reset: /),
+    ]);
   });
 });

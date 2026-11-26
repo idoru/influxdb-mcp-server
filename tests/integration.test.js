@@ -1,1899 +1,286 @@
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import { jest } from "@jest/globals";
-import { spawn } from "child_process";
-import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import * as path from "path";
-import { fileURLToPath } from "url";
-import { dirname } from "path";
+import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import waitForExpect from "wait-for-expect";
+import { fluxString } from "../src/utils/flux.js";
 import {
   createRunBucket,
+  csvRecords,
   deleteRunResources,
   describeInflux,
+  fieldValues,
+  getJson,
+  getOrgId,
   influx,
+  influxApi,
+  measurementFlux,
+  queryCsv,
   uniqueName,
   waitForInfluxDBReady,
+  writeSampleData,
 } from "./support/influx.js";
-import { fluxQueryExamplesPrompt } from "../src/prompts/fluxQueryExamplesPrompt.js";
-import { lineProtocolGuidePrompt } from "../src/prompts/lineProtocolGuidePrompt.js";
-
-// Get __dirname equivalent for ES modules
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-// The InfluxDB instance comes from INFLUXDB_TEST_* (see tests/support/influx.js)
-const INFLUXDB_URL = influx.url;
-const INFLUXDB_ADMIN_TOKEN = influx.adminToken;
-const INFLUXDB_ORG = influx.org;
-// Each run writes to its own bucket, created in beforeAll and deleted in afterAll
-const INFLUXDB_BUCKET = uniqueName("integration");
+import {
+  REQUEST_OPTIONS,
+  SERVER_PATH,
+  createdId,
+  resourceJson,
+  serverEnv,
+  stopProcess,
+  toolText,
+  withMcpClient,
+} from "./support/mcp.js";
 
 jest.setTimeout(60000);
 
-// This test suite focuses only on direct InfluxDB API testing without using MCP
-// This approach isolates the InfluxDB functionality from MCP client connectivity issues
-describeInflux("InfluxDB MCP Server Integration Tests", () => {
-  // We won't use these for direct testing
-  let mcpServerProcess = null;
-  let mcpClient = null;
-  let mcpServerEnv = null;
+// The InfluxDB instance comes from INFLUXDB_TEST_* (see tests/support/influx.js)
+const { url: INFLUXDB_URL, adminToken: INFLUXDB_ADMIN_TOKEN, org: INFLUXDB_ORG } = influx;
+// This suite's own bucket, created and filled with sample data in beforeAll
+const INFLUXDB_BUCKET = uniqueName("integration");
 
-  // Setup: wait for the provided InfluxDB and create this run's bucket
+// Settings for every server this suite starts. create-bucket needs the admin token.
+const SERVER_ENV = {
+  INFLUXDB_URL,
+  INFLUXDB_TOKEN: INFLUXDB_ADMIN_TOKEN,
+  INFLUXDB_ORG,
+};
+
+const RETENTION_RULES = [expect.objectContaining({ type: "expire", everySeconds: 3600 })];
+
+const parseJsonLine = (line) => {
+  try {
+    return JSON.parse(line);
+  } catch {
+    return null;
+  }
+};
+
+// Read one resource through a fresh server and return its parsed JSON
+const readResource = (uri, env = SERVER_ENV) =>
+  withMcpClient(env, async (client) => resourceJson(await client.readResource({ uri }, REQUEST_OPTIONS)));
+
+// Call one tool through a fresh server and return the text of its successful result
+const callTool = (name, args) =>
+  withMcpClient(SERVER_ENV, async (client) =>
+    toolText(await client.callTool({ name, arguments: args }, undefined, REQUEST_OPTIONS)),
+  );
+
+// End-to-end tests against a real InfluxDB: the MCP server over stdio, and
+// the InfluxDB API directly as a baseline. MCP tests never fall back to the
+// API: if the server misbehaves, the test fails.
+describeInflux("InfluxDB MCP Server Integration Tests", () => {
   beforeAll(async () => {
     await waitForInfluxDBReady();
     await createRunBucket("integration");
-
-    // Set up environment variables for direct testing of handlers
-    mcpServerEnv = {
-      ...process.env,
-      INFLUXDB_URL: `${INFLUXDB_URL}`,
-      INFLUXDB_TOKEN: INFLUXDB_ADMIN_TOKEN,
-      INFLUXDB_ORG: INFLUXDB_ORG,
-    };
-
-    // Set environment variables for the current process
-    // This allows the direct handler tests to work properly
-    process.env.INFLUXDB_URL = `${INFLUXDB_URL}`;
-    process.env.INFLUXDB_TOKEN = INFLUXDB_ADMIN_TOKEN;
-    process.env.INFLUXDB_ORG = INFLUXDB_ORG;
-
-    console.log("Environment variables set for direct handler testing:", {
-      INFLUXDB_URL: process.env.INFLUXDB_URL,
-      INFLUXDB_TOKEN: process.env.INFLUXDB_TOKEN ? "Set" : "Not set",
-      INFLUXDB_ORG: process.env.INFLUXDB_ORG,
-    });
+    await writeSampleData(INFLUXDB_BUCKET);
   });
 
-  // Teardown: stop the MCP client and server, delete this run's resources
+  // Delete only the buckets and orgs this run created; a failure fails the suite
   afterAll(async () => {
-    console.log("Running test cleanup...");
-
-    try {
-      // Clean up MCP client and server first
-      console.log("Cleaning up MCP client and server...");
-
-      // Set a flag to indicate cleanup is in progress
-      global.testCleanupInProgress = true;
-
-      // Close MCP client if it exists
-      if (mcpClient) {
-        try {
-          console.log("Closing MCP client...");
-          await mcpClient.close().catch((e) =>
-            console.error("Error closing MCP client:", e.message)
-          );
-          mcpClient = null;
-          console.log("MCP client closed successfully");
-        } catch (e) {
-          console.error("Failed to close MCP client:", e.message);
-        }
-      }
-
-      // Kill any server processes that might still be running
-      if (mcpServerProcess) {
-        try {
-          console.log("Killing MCP server process...");
-
-          // Remove any event listeners first to prevent lingering handlers
-          if (mcpServerProcess.stderr) {
-            if (mcpServerProcess._stderrHandler) {
-              mcpServerProcess.stderr.removeListener(
-                "data",
-                mcpServerProcess._stderrHandler,
-              );
-              console.log("Removed stderr handler");
-            }
-            // Remove all listeners as a fallback
-            mcpServerProcess.stderr.removeAllListeners("data");
-          }
-
-          if (mcpServerProcess.stdout) {
-            if (mcpServerProcess._stdoutHandler) {
-              mcpServerProcess.stdout.removeListener(
-                "data",
-                mcpServerProcess._stdoutHandler,
-              );
-              console.log("Removed stdout handler");
-            }
-            // Remove all listeners as a fallback
-            mcpServerProcess.stdout.removeAllListeners("data");
-          }
-
-          // Kill and wait a moment for it to fully terminate
-          mcpServerProcess.kill("SIGKILL");
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          mcpServerProcess = null;
-          console.log("MCP server process killed successfully");
-        } catch (e) {
-          console.error("Failed to kill MCP server process:", e.message);
-        }
-      }
-
-      // Clear the global heartbeat interval if it exists
-      if (global.mcpHeartbeatInterval) {
-        clearInterval(global.mcpHeartbeatInterval);
-        global.mcpHeartbeatInterval = null;
-        console.log("Cleared global heartbeat interval");
-      }
-
-      // Delete only the buckets and orgs this run created
-      await deleteRunResources().catch((error) =>
-        console.error("Error deleting test resources:", error.message)
-      );
-
-      console.log("Cleanup completed successfully");
-    } catch (error) {
-      console.error("Error during test cleanup:", error.message);
-    } finally {
-      // Reset the cleanup flag
-      global.testCleanupInProgress = false;
-      console.log("Test cleanup completed");
-    }
+    await deleteRunResources();
   });
 
-  // Helper: Write sample data to InfluxDB
-  async function writeSampleData() {
-    console.log("Writing sample data to InfluxDB...");
+  test("should write sample data to InfluxDB", async () => {
+    await writeSampleData(INFLUXDB_BUCKET);
 
-    const data = `
-cpu_usage,host=server01,region=us-west cpu=64.2,mem=47.3 ${Date.now() * 1000000}
-cpu_usage,host=server02,region=us-east cpu=72.1,mem=52.8 ${Date.now() * 1000000}
-temperature,location=datacenter,sensor=rack1 value=24.5 ${Date.now() * 1000000}
-temperature,location=datacenter,sensor=rack2 value=25.1 ${Date.now() * 1000000}
-`;
+    const records = csvRecords(await queryCsv(measurementFlux(INFLUXDB_BUCKET, "temperature")));
+    expect(records.map((record) => record.sensor)).toEqual(expect.arrayContaining(["rack1", "rack2"]));
+  });
 
-    try {
-      const response = await fetch(
-        `${INFLUXDB_URL}/api/v2/write?org=${INFLUXDB_ORG}&bucket=${INFLUXDB_BUCKET}&precision=ns`,
-        {
-          method: "POST",
-          headers: {
-            "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-            "Content-Type": "text/plain; charset=utf-8",
-          },
-          body: data.trim(),
-        },
-      );
+  test("should list organizations - direct API", async () => {
+    const { orgs } = await getJson(`/api/v2/orgs?${new URLSearchParams({ org: INFLUXDB_ORG })}`);
+    expect(orgs).toEqual([expect.objectContaining({ name: INFLUXDB_ORG })]);
+  });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Failed to write sample data: ${errorText}`);
-      }
+  test("should list organizations - MCP client", async () => {
+    const { orgs } = await readResource("influxdb://orgs");
+    expect(orgs.map((org) => org.name)).toContain(INFLUXDB_ORG);
+  });
 
-      console.log("Sample data written successfully");
+  test("should list buckets - direct API", async () => {
+    const orgID = await getOrgId();
+    const { buckets } = await getJson(`/api/v2/buckets?${new URLSearchParams({ name: INFLUXDB_BUCKET })}`);
+    expect(buckets).toEqual([expect.objectContaining({ name: INFLUXDB_BUCKET, orgID })]);
+  });
+
+  test("should list buckets - MCP client", async () => {
+    const { buckets } = await readResource("influxdb://buckets");
+    expect(buckets.map((bucket) => bucket.name)).toContain(INFLUXDB_BUCKET);
+  });
+
+  test("should list measurements in a bucket - direct API", async () => {
+    const csv = await queryCsv(
+      `import "influxdata/influxdb/schema"\n\nschema.measurements(bucket: ${fluxString(INFLUXDB_BUCKET)})`,
+    );
+    expect(csvRecords(csv).map((record) => record._value)).toEqual(
+      expect.arrayContaining(["cpu_usage", "temperature"]),
+    );
+  });
+
+  test("should list measurements in a bucket - MCP client", async () => {
+    const data = await readResource(`influxdb://bucket/${encodeURIComponent(INFLUXDB_BUCKET)}/measurements`);
+    expect(data).toEqual({
+      bucket: INFLUXDB_BUCKET,
+      measurements: expect.arrayContaining(["cpu_usage", "temperature"]),
+    });
+  });
+
+  // Talks to the server process without the SDK client: newline-delimited
+  // JSON-RPC on stdin and stdout, as any MCP client would
+  test("should write data over raw JSON-RPC on stdio", async () => {
+    const timestamp = Date.now();
+    const child = spawn(process.execPath, [SERVER_PATH], { env: serverEnv(SERVER_ENV) });
+    const stdoutLines = [];
+    createInterface({ input: child.stdout }).on("line", (line) => stdoutLines.push(line));
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+
+    const send = (message) => child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
+    const responseTo = async (id) => {
+      let response;
+      await waitForExpect(() => {
+        response = stdoutLines.map(parseJsonLine).find((message) => message?.id === id);
+        expect(response).toBeDefined();
+      }, 10000);
       return response;
-    } catch (error) {
-      console.error("Error writing sample data:", error.message);
-      throw error;
-    }
-  }
-
-  // Helper: Prepare environment for MCP server
-  async function startMcpServer() {
-    console.log("Preparing MCP server environment...");
-
-    // Just store the environment for the client to use later
-    mcpServerEnv = {
-      ...process.env,
-      INFLUXDB_URL: `${INFLUXDB_URL}`,
-      INFLUXDB_TOKEN: INFLUXDB_ADMIN_TOKEN, // Use admin token which has full access
-      INFLUXDB_ORG: INFLUXDB_ORG,
-      DEBUG: "mcp:*", // Add debug flags
     };
 
-    console.log("MCP server environment prepared");
-  }
-
-  // Helper: Initialize the MCP client with enhanced debugging
-  async function initializeMcpClient() {
-    console.log("Initializing MCP client...");
-
     try {
-      // Debug: Check environment variables we're about to use
-      console.log("MCP Client environment setup:", {
-        influxdbUrl: `${INFLUXDB_URL}`,
-        org: INFLUXDB_ORG,
-      });
-
-      // ALWAYS create a fresh instance to avoid connection issues
-      console.log("Cleaning up any existing connections...");
-
-      // Close any existing client first
-      if (mcpClient) {
-        try {
-          await mcpClient.close().catch(() => {});
-          console.log("Closed existing MCP client");
-          mcpClient = null;
-        } catch (e) {
-          // Ignore errors here
-        }
-      }
-
-      // Kill any existing server process
-      if (mcpServerProcess) {
-        try {
-          mcpServerProcess.kill("SIGKILL"); // Use SIGKILL to ensure it's stopped
-          console.log("Killed existing MCP server process");
-          // Wait a moment to ensure the process is fully terminated
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          mcpServerProcess = null;
-        } catch (e) {
-          // Ignore errors here
-        }
-      }
-
-      // Create a simple environment for the MCP server
-      // NOTE: We must use the ADMIN token for testing because the regular token doesn't have access
-      const serverEnv = {
-        ...process.env,
-        INFLUXDB_URL: `${INFLUXDB_URL}`,
-        INFLUXDB_TOKEN: INFLUXDB_ADMIN_TOKEN, // Use admin token instead of regular token
-        INFLUXDB_ORG: INFLUXDB_ORG,
-        DEBUG: "mcp:*", // Add debug logs for MCP protocol
-        MCP_TEST_MODE: "true", // Add test mode flag for better compatibility
-      };
-
-      console.log("Creating new client with transport...");
-
-      // Create a fresh McpClient instance with longer timeout
-      mcpClient = new McpClient({
-        name: "test-client",
-        version: "1.0.0",
-        timeout: 20000, // Even longer timeout for stability
-      });
-
-      // Monkey patch the client with our own isConnected property
-      // This is because the MCP client doesn't have an isConnected property natively
-      // It only checks if transport exists to determine connection status
-      Object.defineProperty(mcpClient, "isConnected", {
-        get: function () {
-          // We consider the client connected if it has a transport property
-          return this._transport !== undefined;
+      send({
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: LATEST_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: "raw-stdio-test", version: "1.0.0" },
         },
       });
+      expect((await responseTo(1)).result.serverInfo.name).toBe("InfluxDB");
 
-      // Add debugging to client's protocol layer if possible
-      if (mcpClient.connect.toString().includes("super.connect")) {
-        const originalConnect = mcpClient.connect;
-        mcpClient.connect = async function (transport) {
-          console.log("[CLIENT-DEBUG] connect() called");
-          try {
-            const result = await originalConnect.call(this, transport);
-            console.log("[CLIENT-DEBUG] connect() succeeded");
-            return result;
-          } catch (err) {
-            console.error("[CLIENT-DEBUG] connect() failed:", err);
-            throw err;
-          }
-        };
-
-        // Enhance request method if available
-        if (mcpClient.request) {
-          const originalRequest = mcpClient.request;
-          mcpClient.request = async function (request, schema) {
-            console.log("[CLIENT-DEBUG] request:", JSON.stringify(request));
-            try {
-              const result = await originalRequest.call(this, request, schema);
-              console.log(
-                "[CLIENT-DEBUG] request succeeded:",
-                JSON.stringify(result),
-              );
-              return result;
-            } catch (err) {
-              console.error("[CLIENT-DEBUG] request failed:", err);
-              throw err;
-            }
-          };
-        }
-
-        // Add onclose callback for debugging
-        mcpClient.onclose = () => {
-          console.error("[CLIENT-DEBUG] Connection closed unexpectedly");
-        };
-
-        // Add onerror callback for debugging
-        mcpClient.onerror = (err) => {
-          console.error("[CLIENT-DEBUG] Protocol error:", err);
-        };
-      }
-
-      // Create the transport first (it will spawn the server process)
-      const transport = new StdioClientTransport({
-        command: process.execPath,
-        args: [path.join(__dirname, "../src/index.js")],
-        env: serverEnv,
-        stderr: "pipe", // Capture stderr for logging
-        stdout: "pipe", // Also capture stdout
-        debugEnabled: true, // Enable transport debugging
-      });
-
-      // Add more transport level debugging
-      if (transport._send) {
-        const originalSend = transport._send;
-        transport._send = function (data) {
-          console.log("[TRANSPORT-DEBUG] SENDING:", JSON.stringify(data));
-          return originalSend.call(this, data);
-        };
-      }
-
-      // Add receive debugging
-      if (transport._receive) {
-        const originalReceive = transport._receive;
-        transport._receive = function (data) {
-          console.log("[TRANSPORT-DEBUG] RECEIVED:", JSON.stringify(data));
-          return originalReceive.call(this, data);
-        };
-      }
-
-      // Add start debugging
-      const originalStart = transport.start;
-      if (originalStart) {
-        transport.start = async function () {
-          console.log("[TRANSPORT-DEBUG] Starting transport...");
-          try {
-            const result = await originalStart.call(this);
-            console.log("[TRANSPORT-DEBUG] Transport started successfully");
-            return result;
-          } catch (err) {
-            console.error("[TRANSPORT-DEBUG] Transport start failed:", err);
-            throw err;
-          }
-        };
-      }
-
-      // Connect first to start the server process
-      console.log("Connecting to MCP server (this will start the process)...");
-
-      // Add detailed debug logging for the connection process
-      try {
-        await mcpClient.connect(transport);
-        console.log("MCP client connect() succeeded");
-
-        // Verify protocol version
-        const serverCaps = mcpClient.getServerCapabilities();
-        const serverInfo = mcpClient.getServerVersion();
-        console.log("Connected to server:", {
-          name: serverInfo?.name,
-          version: serverInfo?.version,
-          capabilities: Object.keys(serverCaps || {}),
-          isConnected: mcpClient.isConnected,
-        });
-      } catch (connError) {
-        console.error("MCP client connect() failed:", connError.message);
-
-        // Try to get stderr output to help diagnose the issue
-        if (transport._process && transport._process.stderr) {
-          const stderrChunks = [];
-          transport._process.stderr.on("data", (chunk) => {
-            stderrChunks.push(chunk);
-          });
-
-          // Give some time to collect stderr output
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-
-          if (stderrChunks.length > 0) {
-            console.error(
-              "Server stderr output:",
-              Buffer.concat(stderrChunks).toString(),
-            );
-          }
-        }
-
-        throw connError;
-      }
-
-      // Add a longer delay to ensure the server is fully initialized
-      console.log("Waiting for server process to initialize...");
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-
-      // Get a reference to the spawned process from the transport
-      mcpServerProcess = transport._process;
-
-      if (mcpServerProcess) {
-        // Set up extensive logging
-        console.log("Setting up server process logging...");
-
-        // Log MCP server output to help debug communication issues
-        if (mcpServerProcess.stderr) {
-          // Use named function so we can remove it later
-          const stderrHandler = (data) => {
-            // Only log if we're not in cleanup mode
-            if (!global.testCleanupInProgress) {
-              console.error(`Server stderr: ${data.toString().trim()}`);
-            }
-          };
-          mcpServerProcess.stderr.on("data", stderrHandler);
-
-          // Store the handler so we can remove it during cleanup
-          mcpServerProcess._stderrHandler = stderrHandler;
-        }
-
-        if (mcpServerProcess.stdout) {
-          // Use named function so we can remove it later
-          const stdoutHandler = (data) => {
-            // Only log if we're not in cleanup mode
-            if (!global.testCleanupInProgress) {
-              console.log(`Server stdout: ${data.toString().trim()}`);
-            }
-          };
-          mcpServerProcess.stdout.on("data", stdoutHandler);
-
-          // Store the handler so we can remove it during cleanup
-          mcpServerProcess._stdoutHandler = stdoutHandler;
-        }
-
-        // Check for process exit
-        mcpServerProcess.on("exit", (code) => {
-          console.log(`Server process exited with code ${code}`);
-        });
-      } else {
-        console.log(
-          "Warning: Could not get reference to server process for logging",
-        );
-      }
-
-      console.log(
-        "Client connection status:",
-        mcpClient.isConnected ? "Connected" : "Not connected",
-      );
-
-      // Verify connection by attempting a simple operation instead of ping
-      try {
-        console.log("Testing connection by listing server capabilities...");
-
-        // Log all available properties of the client for debugging
-        console.log(
-          "MCP client properties:",
-          Object.getOwnPropertyNames(mcpClient),
-        );
-        console.log(
-          "MCP client prototype properties:",
-          Object.getOwnPropertyNames(Object.getPrototypeOf(mcpClient)),
-        );
-
-        // Check if essential MCP client properties are defined
-        if (!mcpClient.resource) {
-          console.error("MCP client is missing resource property!");
-        }
-
-        if (!mcpClient.tool) {
-          console.error("MCP client is missing tool property!");
-        }
-
-        // This will throw if not connected, but doesn't require special protocol support
-        const capabilities = mcpClient.getServerCapabilities();
-
-        // Also get server info as an extra check
-        const serverInfo = mcpClient.getServerVersion();
-
-        console.log("Connection check successful. Server info:", {
-          name: serverInfo?.name,
-          version: serverInfo?.version,
-          capabilities: Object.keys(capabilities || {}),
-        });
-
-        // Verify that we got some reasonable server info
-        if (!serverInfo || !serverInfo.name || !serverInfo.version) {
-          throw new Error(
-            "Got empty server info, connection may not be fully established",
-          );
-        }
-
-        // Check if the client is properly initialized
-        if (!mcpClient.resource || !mcpClient.tool) {
-          // Try to fix client initialization
-          console.log(
-            "Attempting to fix client initialization - client is missing essential properties",
-          );
-
-          // Add resource and tool properties if missing
-          if (!mcpClient.resource) {
-            console.log("Adding missing resource property");
-            mcpClient.resource = {
-              get: async (uri) => {
-                console.log(`Calling resource.get with URI: ${uri}`);
-                return mcpClient.readResource({ uri });
-              },
-              list: async (uri) => {
-                console.log(`Calling resource.list with URI: ${uri}`);
-                return mcpClient.listResources({ uri });
-              },
-            };
-          }
-
-          if (!mcpClient.tool) {
-            console.log("Adding missing tool property");
-            mcpClient.tool = {
-              invoke: async (name, params) => {
-                console.log(`Calling tool.invoke for tool ${name}`);
-                return mcpClient.callTool({ name, arguments: params });
-              },
-            };
-          }
-        }
-
-        // Set a session flag indicating we have a verified connection
-        mcpClient._connectionVerified = true;
-      } catch (connectionError) {
-        console.error(
-          "Connection verification failed:",
-          connectionError.message,
-        );
-
-        // Try a more basic check - if the transport exists, we might be able to proceed anyway
-        if (mcpClient._transport) {
-          console.log(
-            "Transport exists, marking connection as verified despite error",
-          );
-
-          // Even if verification failed, try to add the missing properties
-          if (!mcpClient.resource) {
-            console.log("Adding missing resource property during fallback");
-            mcpClient.resource = {
-              get: async (uri) => {
-                console.log(`Calling resource.get with URI: ${uri}`);
-                return mcpClient.readResource({ uri });
-              },
-              list: async (uri) => {
-                console.log(`Calling resource.list with URI: ${uri}`);
-                return mcpClient.listResources({ uri });
-              },
-            };
-          }
-
-          if (!mcpClient.tool) {
-            console.log("Adding missing tool property during fallback");
-            mcpClient.tool = {
-              invoke: async (name, params) => {
-                console.log(`Calling tool.invoke for tool ${name}`);
-                return mcpClient.callTool({ name, arguments: params });
-              },
-            };
-          }
-
-          mcpClient._connectionVerified = true;
-        } else {
-          throw new Error(
-            "MCP client connection verification failed, cannot proceed with tests",
-          );
-        }
-      }
-
-      console.log("MCP client initialized successfully");
-      return mcpClient;
-    } catch (error) {
-      console.error("Failed to initialize MCP client:", error.message);
-      throw error;
-    }
-  }
-
-  // Test: Write some sample data - direct API test
-  test("should write sample data to InfluxDB", async () => {
-    console.log("Testing InfluxDB write functionality...");
-
-    try {
-      const response = await writeSampleData();
-      expect(response.ok).toBe(true);
-
-      // Verify data was written by checking via a direct API call
-      const verifyResponse = await fetch(
-        `${INFLUXDB_URL}/api/v2/query?org=${
-          encodeURIComponent(INFLUXDB_ORG)
-        }`,
-        {
-          method: "POST",
-          headers: {
-            "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-            "Content-Type": "application/json",
+      send({ method: "notifications/initialized" });
+      send({
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "write-data",
+          arguments: {
+            org: INFLUXDB_ORG,
+            bucket: INFLUXDB_BUCKET,
+            data: `network_traffic,host=gateway01 bytes_in=1024i,bytes_out=2048i ${timestamp}`,
+            precision: "ms",
           },
-          body: JSON.stringify({
-            query: `from(bucket: "${INFLUXDB_BUCKET}")
-              |> range(start: -1h)
-              |> filter(fn: (r) => r._measurement == "cpu_usage")
-              |> limit(n: 1)`,
-            type: "flux",
-          }),
         },
-      );
+      });
+      const response = await responseTo(2);
+      expect(response.error).toBeUndefined();
+      expect(response.result.isError).toBeFalsy();
+      expect(response.result.content).toEqual([{ type: "text", text: "Data written successfully" }]);
 
-      expect(verifyResponse.ok).toBe(true);
-      const responseText = await verifyResponse.text();
-      expect(responseText).toContain("cpu_usage");
-      console.log("Sample data successfully written and verified!");
+      // stdout is reserved for JSON-RPC; a log line there would break clients
+      expect(stdoutLines.filter((line) => parseJsonLine(line)?.jsonrpc !== "2.0")).toEqual([]);
     } catch (error) {
-      console.error("Error during sample data test:", error);
-      throw error;
-    }
-  });
-
-  // Helper function to wrap MCP client calls with timeout and retry
-  async function withTimeout(
-    promise,
-    timeoutMs = 10000, // Increase default timeout to 10 seconds for better stability
-    operationName = "operation",
-    retries = 3, // Increase retry count
-  ) {
-    let lastError;
-
-    // Examine if our client is actually connected
-    function checkConnection() {
-      if (!mcpClient) {
-        console.error(
-          "MCP client is null when trying operation:",
-          operationName,
-        );
-        console.log("Will attempt to create a new client...");
-        return false;
-      }
-
-      // Check both isConnected property and _connectionVerified flag
-      if (!mcpClient.isConnected || !mcpClient._connectionVerified) {
-        console.log(
-          `MCP client connection state: isConnected=${mcpClient.isConnected}, verified=${
-            mcpClient._connectionVerified ? "yes" : "no"
-          }`,
-        );
-        console.log(
-          "Connection needs to be (re)established, will initialize a new client",
-        );
-        return false;
-      }
-
-      return true;
-    }
-
-    // Try the operation up to retries+1 times
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        // Check connection state before each attempt
-        if (!checkConnection()) {
-          // Try to reinitialize the client if needed
-          try {
-            await initializeMcpClient();
-
-            // After initialization, verify again that we have a valid connection
-            if (!mcpClient || !mcpClient._connectionVerified) {
-              throw new Error("Failed to establish a verified connection");
-            }
-          } catch (e) {
-            console.error("Failed to reconnect client:", e.message);
-            // Wait a bit longer before continuing with the attempt
-            await new Promise((resolve) => setTimeout(resolve, 3000));
-          }
-        }
-
-        // Print what operation we're about to perform and the exact resource URI
-        if (operationName === "List buckets") {
-          console.log("About to request resource: influxdb://buckets");
-        } else if (operationName === "List measurements") {
-          console.log(
-            `About to request resource: influxdb://bucket/${INFLUXDB_BUCKET}/measurements`,
-          );
-        } else if (operationName === "List organizations via MCP") {
-          console.log("About to request resource: influxdb://orgs");
-        }
-
-        console.log(
-          `${operationName}: attempt ${attempt + 1}/${
-            retries + 1
-          } (timeout: ${timeoutMs}ms)`,
-        );
-
-        // Execute the promise with a timeout. Clear the timer if the promise
-        // settles so Jest doesn't see stray console.error calls after tests end.
-        return await new Promise((resolve, reject) => {
-          const timeoutId = setTimeout(() => {
-            console.error(
-              `${operationName} timed out after ${timeoutMs}ms - this likely indicates the server is not handling the request`,
-            );
-            reject(new Error(`${operationName} timed out after ${timeoutMs}ms`));
-          }, timeoutMs);
-
-          promise
-            .then((value) => {
-              clearTimeout(timeoutId);
-              resolve(value);
-            })
-            .catch((err) => {
-              clearTimeout(timeoutId);
-              reject(err);
-            });
-        });
-      } catch (error) {
-        lastError = error;
-        console.log(
-          `${operationName} attempt ${attempt + 1}/${
-            retries + 1
-          } failed: ${error.message}`,
-        );
-
-        // If the error indicates a connection problem, invalidate our connection verification
-        if (
-          error.message.includes("connection") ||
-          error.message.includes("transport") ||
-          error.message.includes("timeout") ||
-          error.message.includes("closed")
-        ) {
-          console.log(
-            "Detected potential connection issue, will reset client on next attempt",
-          );
-          if (mcpClient) {
-            mcpClient._connectionVerified = false;
-          }
-        }
-
-        if (attempt < retries) {
-          // Wait longer between retries
-          const backoffTime = 2000 * Math.pow(2, attempt); // Exponential backoff
-          console.log(`Waiting ${backoffTime}ms before next retry...`);
-          await new Promise((resolve) => setTimeout(resolve, backoffTime));
-        }
-      }
-    }
-
-    // If we get here, all retries failed
-    throw lastError ||
-      new Error(`${operationName} failed after ${retries + 1} attempts`);
-  }
-
-  // Test: List organizations using direct InfluxDB API
-  test("should list organizations - direct API", async () => {
-    console.log("Testing organization listing via direct API...");
-
-    try {
-      // Test direct API call to list organizations
-      const apiUrl = `${INFLUXDB_URL}/api/v2/orgs`;
-      console.log(`Making direct request to: ${apiUrl}`);
-
-      const response = await fetch(apiUrl, {
-        method: "GET",
-        headers: {
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        signal: AbortSignal.timeout(5000),
-      });
-
-      console.log(`Response status: ${response.status}`);
-      expect(response.status).toBe(200);
-
-      const data = await response.json();
-
-      // Validate response
-      expect(data).toBeDefined();
-      expect(data.orgs).toBeDefined();
-      expect(Array.isArray(data.orgs)).toBe(true);
-      expect(data.orgs.length).toBeGreaterThan(0);
-      expect(data.orgs.some((org) => org.name === INFLUXDB_ORG)).toBe(true);
-
-      // Save the orgs for comparison
-      console.log(
-        `Found orgs via direct API: ${
-          data.orgs.map((org) => org.name).join(", ")
-        }`,
-      );
-
-      console.log("Organization listing test completed successfully");
-    } catch (error) {
-      console.error("Organization test failed:", error.message);
-      throw error;
-    }
-  });
-
-  // Test: List organizations using MCP client
-  test("should list organizations - MCP client", async () => {
-    console.log("Testing organization listing via MCP client...");
-
-    // Initialize MCP client and server
-    await startMcpServer();
-    const client = await initializeMcpClient();
-
-    // Use the client to list organizations
-    console.log("Requesting organizations from MCP server...");
-    const resourceUri = "influxdb://orgs";
-
-    // Use client.resource.get method
-    console.log("Using client.resource.get");
-
-    // Use withTimeout to handle potential timeouts
-    const response = await withTimeout(
-      client.resource.get(resourceUri),
-      10000,
-      "List organizations via MCP",
-    );
-
-    console.log("MCP server response received for organizations");
-
-    // The response should have contents[0].text as a JSON string
-    expect(response).toBeDefined();
-    expect(response.contents).toBeDefined();
-    expect(response.contents[0]).toBeDefined();
-    expect(response.contents[0].text).toBeDefined();
-
-    // Parse the JSON string
-    const orgsData = JSON.parse(response.contents[0].text);
-    console.log(
-      `Found orgs via MCP client: ${
-        orgsData.orgs?.map((org) => org.name).join(", ") || "none"
-      }`,
-    );
-
-    // Validate the response
-    expect(orgsData).toBeDefined();
-    expect(orgsData.error).toBeUndefined(); // No error should be present
-    expect(orgsData.orgs).toBeDefined();
-    expect(Array.isArray(orgsData.orgs)).toBe(true);
-
-    // Verify we have at least one organization
-    expect(orgsData.orgs.length).toBeGreaterThan(0);
-
-    // Compare with the test org
-    const containsTestOrg = orgsData.orgs.some((org) =>
-      org.name === INFLUXDB_ORG
-    );
-    expect(containsTestOrg).toBe(true);
-
-    console.log("MCP client organization listing test completed successfully");
-  });
-
-  // Test: List buckets using direct API
-  test("should list buckets - direct API", async () => {
-    console.log("Testing bucket listing via direct API...");
-
-    try {
-      // Get buckets via direct API
-      const bucketUrl = `${INFLUXDB_URL}/api/v2/buckets`;
-      console.log(`Making direct request to: ${bucketUrl}`);
-
-      const response = await fetch(bucketUrl, {
-        method: "GET",
-        headers: {
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        signal: AbortSignal.timeout(5000),
-      });
-
-      console.log(`Response status: ${response.status}`);
-      expect(response.status).toBe(200);
-
-      const data = await response.json();
-
-      // Validate response
-      expect(data).toBeDefined();
-      expect(data.buckets).toBeDefined();
-      expect(Array.isArray(data.buckets)).toBe(true);
-      expect(data.buckets.length).toBeGreaterThan(0);
-
-      // Check if our test bucket is in the list
-      const foundBucket = data.buckets.some((bucket) =>
-        bucket.name === INFLUXDB_BUCKET
-      );
-      expect(foundBucket).toBe(true);
-
-      // Log the buckets and their org IDs
-      console.log("Buckets found via direct API:");
-      data.buckets.forEach((bucket) => {
-        console.log(`- Name: ${bucket.name}, OrgID: ${bucket.orgID}`);
-      });
-
-      console.log("Bucket listing test completed successfully");
-    } catch (error) {
-      console.error("Bucket test failed:", error.message);
-      throw error;
-    }
-  });
-
-  // Test: List buckets using MCP client
-  test("should list buckets - MCP client", async () => {
-    console.log("Testing bucket listing via MCP client...");
-
-    // Initialize MCP client and server
-    await startMcpServer();
-    const client = await initializeMcpClient();
-
-    // Use the client to list buckets
-    console.log("Requesting buckets from MCP server...");
-    const resourceUri = "influxdb://buckets";
-
-    // Use withTimeout to handle potential timeouts
-    const response = await withTimeout(
-      client.resource.get(resourceUri),
-      10000,
-      "List buckets via MCP",
-    );
-
-    console.log("MCP server response received for buckets");
-
-    // The response should have contents[0].text as a JSON string
-    expect(response).toBeDefined();
-    expect(response.contents).toBeDefined();
-    expect(response.contents[0]).toBeDefined();
-    expect(response.contents[0].text).toBeDefined();
-
-    // Parse the JSON string
-    const bucketsData = JSON.parse(response.contents[0].text);
-
-    // Validate the response
-    expect(bucketsData).toBeDefined();
-    expect(bucketsData.error).toBeUndefined(); // No error should be present
-    expect(bucketsData.buckets).toBeDefined();
-    expect(Array.isArray(bucketsData.buckets)).toBe(true);
-
-    // Verify we have at least one bucket
-    expect(bucketsData.buckets.length).toBeGreaterThan(0);
-
-    // Log the buckets and their org IDs
-    console.log("Buckets found via MCP client:");
-    bucketsData.buckets.forEach((bucket) => {
-      console.log(`- Name: ${bucket.name}, OrgID: ${bucket.orgID}`);
-    });
-
-    // Check if our test bucket is in the list
-    const foundBucket = bucketsData.buckets.some((bucket) =>
-      bucket.name === INFLUXDB_BUCKET
-    );
-    expect(foundBucket).toBe(true);
-
-    console.log("MCP client bucket listing test completed successfully");
-  });
-
-  // Test: List measurements in a bucket using direct API
-  test("should list measurements in a bucket - direct API", async () => {
-    console.log("Testing measurements listing via direct API...");
-
-    try {
-      // Create the Flux query to list measurements
-      const queryBody = JSON.stringify({
-        query: `import "influxdata/influxdb/schema"
-
-schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
-        type: "flux",
-      });
-
-      // Query measurements via direct API
-      const queryUrl = `${INFLUXDB_URL}/api/v2/query?org=${
-        encodeURIComponent(INFLUXDB_ORG)
-      }`;
-      console.log(`Making query request to: ${queryUrl}`);
-
-      const response = await fetch(queryUrl, {
-        method: "POST",
-        headers: {
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: queryBody,
-        signal: AbortSignal.timeout(5000),
-      });
-
-      console.log(`Response status: ${response.status}`);
-      expect(response.status).toBe(200);
-
-      const responseText = await response.text();
-
-      // Validate response - expect to find the measurement we created
-      expect(responseText).toContain("_value");
-      expect(responseText).toContain("cpu_usage");
-
-      console.log("Measurements listing test completed successfully");
-    } catch (error) {
-      console.error("Measurements test failed:", error.message);
-      throw error;
-    }
-  });
-
-  // Test: List measurements in a bucket using MCP client
-  test("should list measurements in a bucket - MCP client", async () => {
-    console.log("Testing measurements listing via MCP client...");
-
-    // First ensure we have some data to query
-    console.log("Writing test data before querying measurements");
-    await writeSampleData();
-
-    // Allow time for the data to be indexed
-    console.log("Waiting for data to be indexed...");
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-
-    // Initialize MCP client and server
-    await startMcpServer();
-    const client = await initializeMcpClient();
-
-    // Construct the bucket measurements URI
-    const resourceUri = `influxdb://bucket/${INFLUXDB_BUCKET}/measurements`;
-
-    // Use withTimeout to handle potential timeouts
-    const response = await withTimeout(
-      client.resource.get(resourceUri),
-      10000,
-      "List measurements via MCP",
-    );
-
-    console.log("MCP server response received for measurements");
-    console.log("Raw response:", JSON.stringify(response));
-
-    // The response should have contents[0].text as a JSON string
-    expect(response).toBeDefined();
-    expect(response.contents).toBeDefined();
-    expect(response.contents[0]).toBeDefined();
-    expect(response.contents[0].text).toBeDefined();
-
-    // Parse the JSON string
-    const measurementsData = JSON.parse(response.contents[0].text);
-    console.log("Parsed measurements data:", measurementsData);
-
-    // Validate the response
-    expect(measurementsData).toBeDefined();
-    expect(measurementsData.error).toBeUndefined(); // No error should be present
-    expect(measurementsData.measurements).toBeDefined();
-    expect(Array.isArray(measurementsData.measurements)).toBe(true);
-
-    // Verify we have measurements (including the ones we just wrote)
-    // In case we get a different response structure, handle that
-    // Use the measurements from the data structure or fallback
-    let measurements = [];
-    if (
-      measurementsData.measurements &&
-      Array.isArray(measurementsData.measurements)
-    ) {
-      measurements = measurementsData.measurements;
-    } else if (typeof measurementsData === "object") {
-      const potentialMeasurements = Object.keys(measurementsData).filter(
-        (key) => key !== "bucket" && key !== "error",
-      );
-      if (potentialMeasurements.length > 0) {
-        measurements = potentialMeasurements;
-      }
-    }
-
-    console.log("Measurements array length:", measurements.length);
-
-    // Log the measurements
-    console.log("Measurements found via MCP client:", measurements);
-
-    // If measurements are empty, try a direct API fallback just to verify the test data exists
-    if (measurements.length === 0) {
-      console.log(
-        "No measurements found via MCP, checking with direct API as fallback",
-      );
-
-      // Create the Flux query to list measurements
-      const queryBody = JSON.stringify({
-        query: `import "influxdata/influxdb/schema"
-
-schema.measurements(bucket: "${INFLUXDB_BUCKET}")`,
-        type: "flux",
-      });
-
-      // Query measurements via direct API
-      const queryUrl = `${INFLUXDB_URL}/api/v2/query?org=${
-        encodeURIComponent(INFLUXDB_ORG)
-      }`;
-      console.log(`Making direct fallback query to: ${queryUrl}`);
-
-      const response = await fetch(queryUrl, {
-        method: "POST",
-        headers: {
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: queryBody,
-        signal: AbortSignal.timeout(5000),
-      });
-
-      console.log(`Direct API response status: ${response.status}`);
-      const responseText = await response.text();
-      console.log("Direct API response:", responseText);
-
-      // For the test to pass with the fallback, we'll consider it a conditional pass
-      expect(responseText).toContain("_value");
-      console.log("Measurements fallback check passed");
-      return;
-    }
-
-    // If we have measurements, continue with the original test
-    expect(measurements.length).toBeGreaterThan(0);
-
-    // Check if our test measurements are in the list
-    const foundCpuUsage = measurements.includes("cpu_usage");
-    expect(foundCpuUsage).toBe(true);
-
-    console.log("MCP client measurements listing test completed successfully");
-  });
-
-  // Test: Direct server communication approach for write-data tool
-  test("should write data using direct communication", async () => {
-    console.log(
-      "Testing write-data functionality using direct server spawn...",
-    );
-
-    // Create test data
-    const lineProtocol =
-      `network_traffic,host=gateway01 bytes_in=1024,bytes_out=2048 ${
-        Date.now() * 1000000
-      }`;
-
-    let serverProcess;
-    try {
-      // We'll spawn our server directly, communicate with it, then check if data was written
-
-      // First, spawn the server process directly
-      serverProcess = spawn(process.execPath, [
-        path.join(__dirname, "../src/index.js"),
-      ], {
-        env: {
-          ...process.env,
-          INFLUXDB_URL: `${INFLUXDB_URL}`,
-          INFLUXDB_TOKEN: INFLUXDB_ADMIN_TOKEN,
-          INFLUXDB_ORG: INFLUXDB_ORG,
-        },
-        stdio: ["ignore", "ignore", "ignore"], // Silence output
-      });
-
-      // Give it a moment to start
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
-      // Now we'll use the InfluxDB API directly to write data
-      const writeUrl = `${INFLUXDB_URL}/api/v2/write?org=${
-        encodeURIComponent(INFLUXDB_ORG)
-      }&bucket=${INFLUXDB_BUCKET}&precision=ns`;
-
-      console.log(`Writing data directly to: ${writeUrl}`);
-
-      const writeResponse = await fetch(writeUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "text/plain; charset=utf-8",
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-        },
-        body: lineProtocol,
-        signal: AbortSignal.timeout(5000),
-      });
-
-      expect(writeResponse.ok).toBe(true);
-      console.log(`Write response status: ${writeResponse.status}`);
-
-      // Verify the data was written using a flux query
-      const queryUrl = `${INFLUXDB_URL}/api/v2/query?org=${
-        encodeURIComponent(INFLUXDB_ORG)
-      }`;
-
-      const verifyResponse = await fetch(queryUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-        },
-        body: JSON.stringify({
-          query: `from(bucket: "${INFLUXDB_BUCKET}")
-            |> range(start: -1h)
-            |> filter(fn: (r) => r._measurement == "network_traffic")`,
-          type: "flux",
-        }),
-        signal: AbortSignal.timeout(5000),
-      });
-
-      expect(verifyResponse.ok).toBe(true);
-      const responseText = await verifyResponse.text();
-
-      // Check that we can find our data
-      expect(responseText).toContain("network_traffic");
-      expect(responseText).toContain("gateway01");
-
-      console.log("Direct communication test completed successfully");
-    } catch (error) {
-      console.error("Direct communication test failed:", error.message);
+      if (stderr.trim()) console.log(`MCP server stderr:\n${stderr.trim()}`);
       throw error;
     } finally {
-      // Stop the process this test started, even when an assertion failed
-      serverProcess?.kill();
+      await stopProcess(child);
     }
+
+    // Millisecond precision was honored: read as nanoseconds, the point would
+    // be in 1970 and outside the queried hour
+    const csv = await queryCsv(measurementFlux(INFLUXDB_BUCKET, "network_traffic", { host: "gateway01" }));
+    expect(fieldValues(csv)).toEqual({ bytes_in: "1024", bytes_out: "2048" });
   });
 
-  // Test: Writing data using MCP client tool
   test("should write data using MCP client write-data tool", async () => {
-    console.log("Testing write-data tool via MCP client...");
+    const timestamp = Date.now();
+    const text = await callTool("write-data", {
+      org: INFLUXDB_ORG,
+      bucket: INFLUXDB_BUCKET,
+      data: `server_metrics,host=webserver01,region=us-west cpu=82.5,memory=65.2,connections=420i ${timestamp}`,
+      precision: "ms",
+    });
+    expect(text).toBe("Data written successfully");
 
-    // Generate timestamp in nanoseconds
-    const timestamp = Date.now() * 1000000;
+    const csv = await queryCsv(measurementFlux(INFLUXDB_BUCKET, "server_metrics", { host: "webserver01" }));
+    expect(fieldValues(csv)).toEqual({ cpu: "82.5", memory: "65.2", connections: "420" });
+    expect(csvRecords(csv).map((record) => record.region)).toEqual(["us-west", "us-west", "us-west"]);
+  });
 
-    // Create unique test data for this test
-    const lineProtocol =
-      `server_metrics,host=webserver01,region=us-west cpu=82.5,memory=65.2,connections=420 ${timestamp}`;
+  test("should query data using Flux - direct API", async () => {
+    const records = csvRecords(await queryCsv(measurementFlux(INFLUXDB_BUCKET, "cpu_usage")));
+    expect(records.map((record) => record.host)).toEqual(expect.arrayContaining(["server01", "server02"]));
+  });
 
-    // Initialize MCP client and server
-    await startMcpServer();
-    const client = await initializeMcpClient();
-
-    // Use the write-data tool
-    console.log("Invoking write-data tool via MCP client...");
-
-    // Use withTimeout to handle potential timeouts with the tool
-    const toolResponse = await withTimeout(
-      client.tool.invoke("write-data", {
-        org: INFLUXDB_ORG,
-        bucket: INFLUXDB_BUCKET,
-        data: lineProtocol,
-        precision: "ns", // Using nanosecond precision
-      }),
-      10000,
-      "Invoke write-data tool via MCP",
-    );
-
-    console.log("MCP tool response received for write-data");
-
-    // The response should have a success message
-    expect(toolResponse).toBeDefined();
-
-    if (toolResponse.error) {
-      console.error("Tool error:", toolResponse.error);
-    }
-    expect(toolResponse.error).toBeUndefined();
-
-    // Verify data was written by querying via direct API
-    const queryUrl = `${INFLUXDB_URL}/api/v2/query?org=${
-      encodeURIComponent(INFLUXDB_ORG)
-    }`;
-
-    const verifyResponse = await fetch(queryUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-      },
-      body: JSON.stringify({
-        query: `from(bucket: "${INFLUXDB_BUCKET}")
-          |> range(start: -1h)
-          |> filter(fn: (r) => r._measurement == "server_metrics" and r.host == "webserver01")`,
-        type: "flux",
-      }),
-      signal: AbortSignal.timeout(5000),
+  test("should query data using MCP client query-data tool", async () => {
+    const csv = await callTool("query-data", {
+      org: INFLUXDB_ORG,
+      query: measurementFlux(INFLUXDB_BUCKET, "cpu_usage"),
     });
 
-    expect(verifyResponse.ok).toBe(true);
-    const responseText = await verifyResponse.text();
-
-    // Check that we can find our data
-    expect(responseText).toContain("server_metrics");
-    expect(responseText).toContain("webserver01");
-    expect(responseText).toContain("us-west");
-
-    // Check for numeric values
-    expect(responseText).toContain("cpu");
-    expect(responseText).toContain("memory");
-    expect(responseText).toContain("connections");
-
-    console.log("MCP client write-data tool test completed successfully");
+    const records = csvRecords(csv);
+    expect(records.length).toBeGreaterThan(0);
+    expect(new Set(records.map((record) => record._measurement))).toEqual(new Set(["cpu_usage"]));
+    expect(records.map((record) => record.host)).toEqual(expect.arrayContaining(["server01", "server02"]));
   });
 
-  // Test: Query data using direct API
-  test("should query data using Flux - direct API", async () => {
-    console.log("Testing Flux query functionality via direct API...");
-
-    try {
-      // First, ensure we have data to query by writing sample data
-      await writeSampleData();
-
-      // Create and send a Flux query
-      const query = `from(bucket: "${INFLUXDB_BUCKET}")
-        |> range(start: -1h)
-        |> filter(fn: (r) => r._measurement == "cpu_usage")
-        |> limit(n: 10)`;
-
-      const queryUrl = `${INFLUXDB_URL}/api/v2/query?org=${
-        encodeURIComponent(INFLUXDB_ORG)
-      }`;
-
-      console.log(`Sending Flux query to: ${queryUrl}`);
-
-      const queryResponse = await fetch(queryUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-        },
-        body: JSON.stringify({
-          query: query,
-          type: "flux",
-        }),
-        signal: AbortSignal.timeout(5000),
-      });
-
-      expect(queryResponse.ok).toBe(true);
-      console.log(`Query response status: ${queryResponse.status}`);
-
-      const responseText = await queryResponse.text();
-
-      // Validate the query results
-      expect(responseText).toContain("cpu_usage");
-      expect(responseText).toContain("server01"); // From our sample data
-
-      console.log("Flux query test completed successfully");
-    } catch (error) {
-      console.error("Flux query test failed:", error.message);
-      throw error;
-    }
-  });
-
-  // Test: Query data using MCP client tool
-  test("should query data using MCP client query-data tool", async () => {
-    console.log("Testing query-data tool via MCP client...");
-
-    // First, ensure we have data to query by writing sample data
-    await writeSampleData();
-
-    // Initialize MCP client and server
-    await startMcpServer();
-    const client = await initializeMcpClient();
-
-    // Create a Flux query
-    const fluxQuery = `from(bucket: "${INFLUXDB_BUCKET}")
-      |> range(start: -1h)
-      |> filter(fn: (r) => r._measurement == "cpu_usage")
-      |> limit(n: 10)`;
-
-    // Use the query-data tool
-    console.log("Invoking query-data tool via MCP client...");
-
-    // Use withTimeout to handle potential timeouts with the tool
-    let toolResponse;
-
-    try {
-      // Try the standard way first
-      toolResponse = await withTimeout(
-        client.tool.invoke("query-data", {
-          org: INFLUXDB_ORG,
-          query: fluxQuery,
-        }),
-        10000,
-        "Invoke query-data tool via MCP",
-      );
-
-      console.log("MCP tool response received for query-data");
-      console.log("Raw tool response:", JSON.stringify(toolResponse));
-
-      // The response should contain query results
-      expect(toolResponse).toBeDefined();
-
-      if (toolResponse.error) {
-        console.error("Tool error:", toolResponse.error);
-      }
-      expect(toolResponse.error).toBeUndefined();
-
-      // Handle different response formats from the tool
-      if (toolResponse.result) {
-        expect(typeof toolResponse.result).toBe("string");
-        expect(toolResponse.result).toContain("cpu_usage");
-        expect(toolResponse.result).toContain("server01");
-      } else if (toolResponse.content) {
-        expect(toolResponse.content).toBeDefined();
-        expect(toolResponse.content[0]).toBeDefined();
-        expect(toolResponse.content[0].text).toBeDefined();
-        expect(toolResponse.content[0].text).toContain("cpu_usage");
-        expect(toolResponse.content[0].text).toContain("server01");
-      } else {
-        throw new Error("Unexpected tool response format");
-      }
-    } catch (error) {
-      console.log(
-        "Error using tool.invoke, falling back to direct API:",
-        error.message,
-      );
-
-      // If the tool call fails or response structure doesn't match expectations, do a direct API call
-      console.log("Using direct API fallback for query");
-
-      const queryUrl = `${INFLUXDB_URL}/api/v2/query?org=${
-        encodeURIComponent(INFLUXDB_ORG)
-      }`;
-
-      const queryResponse = await fetch(queryUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-        },
-        body: JSON.stringify({
-          query: fluxQuery,
-          type: "flux",
-        }),
-        signal: AbortSignal.timeout(5000),
-      });
-
-      expect(queryResponse.ok).toBe(true);
-      const responseText = await queryResponse.text();
-      expect(responseText).toContain("cpu_usage");
-      expect(responseText).toContain("server01");
-      console.log("Direct API fallback succeeded");
-    }
-
-    console.log("MCP client query-data tool test completed successfully");
-  });
-
-  // Test: Create bucket using direct API
   test("should create a new bucket - direct API", async () => {
-    console.log("Testing bucket creation via direct API...");
+    const orgID = await getOrgId();
+    const name = uniqueName("bucket-direct");
 
-    try {
-      // First, get the org ID
-      const orgsUrl = `${INFLUXDB_URL}/api/v2/orgs?org=${
-        encodeURIComponent(INFLUXDB_ORG)
-      }`;
-      console.log(`Getting organization info from: ${orgsUrl}`);
+    const response = await influxApi("/api/v2/buckets", {
+      method: "POST",
+      body: JSON.stringify({ name, orgID, retentionRules: [{ type: "expire", everySeconds: 3600 }] }),
+    });
+    expect(response.status).toBe(201);
+    const { id } = await response.json();
 
-      const orgsResponse = await fetch(orgsUrl, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-        },
-        signal: AbortSignal.timeout(5000),
-      });
-
-      expect(orgsResponse.ok).toBe(true);
-      const orgsData = await orgsResponse.json();
-      expect(orgsData.orgs).toHaveLength(1);
-
-      const orgID = orgsData.orgs[0].id;
-      console.log(`Found organization ID: ${orgID}`);
-
-      // Create a new bucket
-      const newBucketName = uniqueName("bucket-direct");
-      const bucketData = {
-        name: newBucketName,
-        orgID: orgID,
-        retentionRules: [
-          { type: "expire", everySeconds: 3600 },
-        ],
-      };
-
-      const createUrl = `${INFLUXDB_URL}/api/v2/buckets`;
-      console.log(`Creating bucket at: ${createUrl}`);
-
-      const createResponse = await fetch(createUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-        },
-        body: JSON.stringify(bucketData),
-        signal: AbortSignal.timeout(5000),
-      });
-
-      expect(createResponse.ok).toBe(true);
-      const bucket = await createResponse.json();
-
-      expect(bucket.name).toBe(newBucketName);
-      expect(bucket.orgID).toBe(orgID);
-
-      // Verify bucket exists by listing all buckets
-      const listUrl = `${INFLUXDB_URL}/api/v2/buckets`;
-      const listResponse = await fetch(listUrl, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-        },
-        signal: AbortSignal.timeout(5000),
-      });
-
-      expect(listResponse.ok).toBe(true);
-      const buckets = await listResponse.json();
-
-      const foundBucket = buckets.buckets.some((b) => b.name === newBucketName);
-      expect(foundBucket).toBe(true);
-
-      console.log("Direct API bucket creation test completed successfully");
-    } catch (error) {
-      console.error("Bucket creation test failed:", error.message);
-      throw error;
-    }
+    expect(await getJson(`/api/v2/buckets/${id}`)).toMatchObject({ name, orgID, retentionRules: RETENTION_RULES });
   });
 
-  // Test: Create bucket using MCP client tool
   test("should create a new bucket using MCP client create-bucket tool", async () => {
-    console.log("Testing create-bucket tool via MCP client...");
+    const orgID = await getOrgId();
+    const name = uniqueName("bucket-mcp");
 
-    try {
-      // First, get the org ID
-      const orgsUrl = `${INFLUXDB_URL}/api/v2/orgs?org=${
-        encodeURIComponent(INFLUXDB_ORG)
-      }`;
-      console.log(`Getting organization info from: ${orgsUrl}`);
+    const text = await callTool("create-bucket", { name, orgID, retentionPeriodSeconds: 3600 });
+    expect(text).toMatch(/^Bucket created successfully:/);
+    expect(text).toContain(`Name: ${name}`);
+    expect(text).toContain(`Organization ID: ${orgID}`);
 
-      const orgsResponse = await fetch(orgsUrl, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-        },
-        signal: AbortSignal.timeout(5000),
-      });
-
-      expect(orgsResponse.ok).toBe(true);
-      const orgsData = await orgsResponse.json();
-      expect(orgsData.orgs).toHaveLength(1);
-
-      const orgID = orgsData.orgs[0].id;
-      console.log(`Found organization ID: ${orgID}`);
-
-      // Initialize MCP client and server
-      await startMcpServer();
-      const client = await initializeMcpClient();
-
-      // Create a unique bucket name for this test
-      const newBucketName = uniqueName("bucket-mcp");
-
-      // Use the create-bucket tool
-      console.log("Invoking create-bucket tool via MCP client...");
-
-      // Use withTimeout to handle potential timeouts with the tool
-      let toolResponse;
-
-      try {
-        toolResponse = await withTimeout(
-          client.tool.invoke("create-bucket", {
-            name: newBucketName,
-            orgID: orgID,
-            retentionPeriodSeconds: 3600, // 1 hour retention
-          }),
-          10000,
-          "Invoke create-bucket tool via MCP",
-        );
-
-        console.log("MCP tool response received for create-bucket");
-        console.log("Raw tool response:", JSON.stringify(toolResponse));
-
-        // The response should contain the created bucket info
-        expect(toolResponse).toBeDefined();
-
-        if (toolResponse.error) {
-          console.error("Tool error:", toolResponse.error);
-        }
-        expect(toolResponse.error).toBeUndefined();
-
-        // Handle different response formats
-        if (toolResponse.result) {
-          const resultObj = JSON.parse(toolResponse.result);
-          expect(resultObj.id).toBeDefined();
-          expect(resultObj.name).toBe(newBucketName);
-          expect(resultObj.orgID).toBe(orgID);
-        } else if (toolResponse.content) {
-          expect(toolResponse.content).toBeDefined();
-          expect(toolResponse.content[0]).toBeDefined();
-          expect(toolResponse.content[0].text).toBeDefined();
-
-          const resultObj = JSON.parse(toolResponse.content[0].text);
-          expect(resultObj.id).toBeDefined();
-          expect(resultObj.name).toBe(newBucketName);
-          expect(resultObj.orgID).toBe(orgID);
-        } else {
-          throw new Error("Unexpected tool response format");
-        }
-      } catch (error) {
-        console.log(
-          "Error using tool.invoke for create-bucket, falling back to direct API:",
-          error.message,
-        );
-
-        // If tool fails, create the bucket directly via API
-        console.log("Using direct API fallback for bucket creation");
-
-        // For the test to pass, don't actually try creating the bucket via direct API
-        // Just log a message and skip the actual API call since we'll check if the bucket exists below
-        console.log("Skipping direct API bucket creation for test reliability");
-
-        // Log that we're continuing with the test
-        console.log(
-          "Will check for bucket existence regardless of tool response",
-        );
-      }
-
-      try {
-        // Try creating the bucket if we reached here without a created bucket
-        // This is a fallback in case both the MCP method and the direct API method failed
-        const createUrl = `${INFLUXDB_URL}/api/v2/buckets`;
-        const bucketData = {
-          name: newBucketName,
-          orgID: orgID,
-          retentionRules: [
-            { type: "expire", everySeconds: 3600 },
-          ],
-        };
-
-        // Try to create, but don't fail the test if this fails
-        await fetch(createUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-          },
-          body: JSON.stringify(bucketData),
-          signal: AbortSignal.timeout(5000),
-        }).catch((err) => {
-          console.log(
-            "Note: Final bucket creation attempt failed, but test can still pass:",
-            err.message,
-          );
-        });
-      } catch (err) {
-        console.log("Final create bucket fallback failed:", err.message);
-      }
-
-      // Verify bucket exists by listing via direct API
-      const listUrl = `${INFLUXDB_URL}/api/v2/buckets`;
-      const listResponse = await fetch(listUrl, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-        },
-        signal: AbortSignal.timeout(5000),
-      });
-
-      expect(listResponse.ok).toBe(true);
-      const buckets = await listResponse.json();
-
-      // Check if our bucket was created by any of the methods we tried
-      const foundBucket = buckets.buckets.some((b) => b.name === newBucketName);
-
-      // If we didn't find the bucket, log all bucket names for debugging
-      if (!foundBucket) {
-        console.log(
-          "Could not find the expected bucket in the list. Available buckets:",
-        );
-        buckets.buckets.forEach((b) => console.log(` - ${b.name}`));
-
-        // For the test to pass regardless, just skip the assertion
-        console.log("Test will pass despite bucket creation issue");
-        return;
-      }
-
-      // If we found it, validate as expected
-      expect(foundBucket).toBe(true);
-
-      console.log("MCP client create-bucket tool test completed successfully");
-    } catch (error) {
-      console.error("MCP bucket creation test failed:", error.message);
-      throw error;
-    }
+    // Check the bucket the tool reported, including its retention
+    const bucket = await getJson(`/api/v2/buckets/${createdId(text)}`);
+    expect(bucket).toMatchObject({ name, orgID, retentionRules: RETENTION_RULES });
   });
 
-  // Test: Query using resource with direct InfluxDB communication
   test("should query data using Flux resource", async () => {
-    console.log("Testing query resource via direct API...");
+    const flux = measurementFlux(INFLUXDB_BUCKET, "cpu_usage");
+    const uri = `influxdb://query/${encodeURIComponent(INFLUXDB_ORG)}/${encodeURIComponent(flux)}`;
 
-    try {
-      // First, make sure we have data to query
-      await writeSampleData();
+    // The query resource is opt-in
+    const result = await readResource(uri, { ...SERVER_ENV, INFLUXDB_ENABLE_QUERY_RESOURCE: "true" });
 
-      // Create a Flux query to fetch cpu_usage data
-      const fluxQuery = `from(bucket: "${INFLUXDB_BUCKET}")
-        |> range(start: -1h)
-        |> filter(fn: (r) => r._measurement == "cpu_usage")
-        |> limit(n: 10)`;
-
-      // Execute the query directly via InfluxDB API
-      const queryUrl = `${INFLUXDB_URL}/api/v2/query?org=${
-        encodeURIComponent(INFLUXDB_ORG)
-      }`;
-
-      console.log(`Querying InfluxDB directly at: ${queryUrl}`);
-
-      const queryResponse = await fetch(queryUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-        },
-        body: JSON.stringify({
-          query: fluxQuery,
-          type: "flux",
-        }),
-        signal: AbortSignal.timeout(5000),
-      });
-
-      expect(queryResponse.ok).toBe(true);
-      const responseText = await queryResponse.text();
-
-      // Validate the query results
-      expect(responseText).toContain("cpu_usage");
-      expect(responseText).toContain("server01");
-
-      console.log("Query resource test completed successfully");
-    } catch (error) {
-      console.error("Query resource test failed:", error.message);
-      throw error;
-    }
+    expect(result.query).toBe(flux);
+    expect(result.organization).toBe(INFLUXDB_ORG);
+    expect(result.data.length).toBeGreaterThan(0);
+    expect(new Set(result.data.map((record) => record._measurement))).toEqual(new Set(["cpu_usage"]));
+    expect(result.data.map((record) => record.host)).toEqual(expect.arrayContaining(["server01", "server02"]));
   });
 
-  // Test: Check flux-query-examples prompt content in server code
-  test("should have valid flux-query-examples prompt", async () => {
-    const prompt = await fluxQueryExamplesPrompt();
-    const text = prompt.messages[0].content.text;
-
-    expect(prompt.messages[0].role).toBe("user");
-    expect(text).toContain("from(bucket:");
-    expect(text).toContain("range(start:");
-  });
-
-  // Test: Compare org IDs between buckets and organizations to find discrepancies
   test("should have consistent org IDs between buckets and orgs", async () => {
-    console.log("Testing consistency between buckets and orgs...");
+    const orgID = await getOrgId();
+    const apiOrgIds = (await getJson("/api/v2/orgs")).orgs.map((org) => org.id);
 
-    try {
-      // Get orgs via direct API
-      const orgsUrl = `${INFLUXDB_URL}/api/v2/orgs`;
-      const orgsResponse = await fetch(orgsUrl, {
-        method: "GET",
-        headers: {
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        signal: AbortSignal.timeout(5000),
-      });
+    const { orgs, buckets } = await withMcpClient(SERVER_ENV, async (client) => ({
+      orgs: resourceJson(await client.readResource({ uri: "influxdb://orgs" }, REQUEST_OPTIONS)).orgs,
+      buckets: resourceJson(await client.readResource({ uri: "influxdb://buckets" }, REQUEST_OPTIONS)).buckets,
+    }));
+    const mcpOrgIds = orgs.map((org) => org.id);
 
-      expect(orgsResponse.status).toBe(200);
-      const orgsData = await orgsResponse.json();
-
-      // Get buckets via direct API
-      const bucketsUrl = `${INFLUXDB_URL}/api/v2/buckets`;
-      const bucketsResponse = await fetch(bucketsUrl, {
-        method: "GET",
-        headers: {
-          "Authorization": `Token ${INFLUXDB_ADMIN_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        signal: AbortSignal.timeout(5000),
-      });
-
-      expect(bucketsResponse.status).toBe(200);
-      const bucketsData = await bucketsResponse.json();
-
-      // Extract all unique org IDs from buckets
-      const bucketOrgIds = [
-        ...new Set(bucketsData.buckets.map((bucket) => bucket.orgID)),
-      ];
-      console.log("Unique org IDs found in buckets:", bucketOrgIds);
-
-      // Extract all org IDs from orgs
-      const orgIds = orgsData.orgs.map((org) => org.id);
-      console.log("Org IDs found in organizations:", orgIds);
-
-      // Check if all bucket org IDs exist in the orgs list
-      const missingOrgIds = bucketOrgIds.filter((orgId) =>
-        !orgIds.includes(orgId)
-      );
-
-      if (missingOrgIds.length > 0) {
-        console.log(
-          "Found org IDs in buckets that don't exist in orgs list:",
-          missingOrgIds,
-        );
-
-        // For each missing org ID, log the buckets that use it
-        missingOrgIds.forEach((orgId) => {
-          const bucketsWithMissingOrg = bucketsData.buckets.filter((bucket) =>
-            bucket.orgID === orgId
-          );
-          console.log(
-            `Buckets with missing org ID ${orgId}:`,
-            bucketsWithMissingOrg.map((b) => `${b.name} (ID: ${b.id})`),
-          );
-        });
-      } else {
-        console.log(
-          "All bucket org IDs exist in the orgs list - no discrepancies",
-        );
-      }
-
-      // Try with MCP client first
-      try {
-        console.log("Trying to get organizations with MCP client...");
-        await startMcpServer();
-        const client = await initializeMcpClient();
-
-        console.log("Requesting organizations from MCP server...");
-        const mcpResponse = await withTimeout(
-          client.resource.get("influxdb://orgs"),
-          10000,
-          "List organizations via MCP for comparison",
-        );
-
-        const mcpOrgsData = JSON.parse(mcpResponse.contents[0].text);
-        const mcpOrgIds = mcpOrgsData.orgs.map((org) => org.id);
-        console.log("Org IDs found via MCP client:", mcpOrgIds);
-
-        // Compare direct API and MCP results
-        const orgIdsDiff = orgIds.filter((id) => !mcpOrgIds.includes(id))
-          .concat(
-            mcpOrgIds.filter((id) => !orgIds.includes(id)),
-          );
-
-        if (orgIdsDiff.length > 0) {
-          console.log(
-            "Difference between direct API and MCP org IDs:",
-            orgIdsDiff,
-          );
-        } else {
-          console.log("Direct API and MCP client return the same org IDs");
-        }
-      } catch (mcpError) {
-        console.error("MCP client approach failed:", mcpError.message);
-
-        // Fall back to direct handler approach
-        console.log("Falling back to direct handler approach...");
-
-        // Now let's get organization data using our handler directly
-        const { listOrganizations } = await import(
-          "../src/handlers/organizationsHandler.js"
-        );
-
-        // Create a sample URI object that matches what MCP would send
-        const sampleUri = new URL("influxdb://orgs");
-
-        // Call the handler function directly
-        console.log("Requesting organizations from our handler...");
-        const handlerResponse = await listOrganizations(sampleUri);
-
-        const handlerOrgsData = JSON.parse(handlerResponse.contents[0].text);
-
-        if (handlerOrgsData.error) {
-          console.log("Error in handler response:", handlerOrgsData.error);
-          // We'll consider the test passed even with an error
-        } else {
-          const handlerOrgIds = handlerOrgsData.orgs.map((org) => org.id);
-          console.log("Org IDs found via handler:", handlerOrgIds);
-
-          // Compare direct API and handler results
-          const orgIdsDiff = orgIds.filter((id) => !handlerOrgIds.includes(id))
-            .concat(
-              handlerOrgIds.filter((id) => !orgIds.includes(id)),
-            );
-
-          if (orgIdsDiff.length > 0) {
-            console.log(
-              "Difference between direct API and handler org IDs:",
-              orgIdsDiff,
-            );
-          } else {
-            console.log("Direct API and handler return the same org IDs");
-          }
-        }
-      }
-    } catch (error) {
-      console.error("Consistency test failed:", error.message);
-      throw error;
-    }
-  });
-
-  // Test: Check line-protocol-guide prompt content in server code
-  test("should have valid line-protocol-guide prompt", async () => {
-    const prompt = await lineProtocolGuidePrompt();
-    const text = prompt.messages[0].content.text;
-
-    expect(prompt.messages[0].role).toBe("user");
-    expect(text).toContain("Line Protocol");
-    expect(text).toContain("measurement,tag-key=tag-value");
+    // The server reports the same orgs as the API
+    expect([...mcpOrgIds].sort()).toEqual([...apiOrgIds].sort());
+    // Every bucket it lists belongs to an org it lists, and this run's bucket to the test org
+    expect(mcpOrgIds).toEqual(expect.arrayContaining([...new Set(buckets.map((bucket) => bucket.orgID))]));
+    expect(buckets.find((bucket) => bucket.name === INFLUXDB_BUCKET)?.orgID).toBe(orgID);
   });
 });

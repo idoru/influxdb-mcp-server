@@ -10,7 +10,7 @@
   - `src/prompts/` stores reusable prompt templates.
   - `src/config/` contains environment, HTTP transport and secret-file configuration (`env.js`, `http.js` and `secrets.js`).
   - `src/utils/` contains shared utilities, including the InfluxDB client, Flux CSV parser, Flux escaping, and logging.
-- `tests/` contains Docker-free unit, configuration and HTTP transport tests, plus `integration.test.js`, which needs an InfluxDB instance. `tests/support/influx.js` holds the shared InfluxDB test setup.
+- `tests/` contains Docker-free unit, configuration and HTTP transport tests, plus `integration.test.js`, which needs an InfluxDB instance. `tests/support/` holds shared test code: InfluxDB setup and cleanup (`influx.js`), the stdio MCP client helper (`mcp.js`) and the console guard (`console-guard.js`, `console.js`).
 - `direct-tests/` contains handler tests against an InfluxDB instance.
 - Keep assets and sample configurations near their consumers. Check README references to `claude_desktop_config.json` when wiring integrations.
 
@@ -23,6 +23,7 @@
 - `INFLUXDB_TOKEN=your_token node src/index.js` — start the server directly with an InfluxDB token.
 - `npm test` — run the suites that need neither Docker nor InfluxDB.
 - `npm test -- -t "test name"` — run a single test by name (for example, `npm test -- -t "should list organizations"`).
+- `npm test -- tests/<suite>.test.js` — run one suite.
 - `scripts/test-influx.sh` — start a throwaway InfluxDB with Docker Compose (loopback only, random credentials), run the integration suites, and remove it.
 - `npm run test:integration` — run the integration suites against the instance in `INFLUXDB_TEST_URL`, `INFLUXDB_TEST_ADMIN_TOKEN` and `INFLUXDB_TEST_ORG`; they are skipped when these are unset, and fail instead with `REQUIRE_INFLUX_TESTS=1`.
 - Set `DEBUG=mcp:*` to enable detailed MCP protocol logging when debugging. This logs full messages, including query text and written data; do not enable it by default.
@@ -45,14 +46,17 @@
 
 ## Testing Guidelines
 
-- Jest is used for testing and is configured through `package.json`.
+- Jest is used for testing and is configured through `jest.config.js`; the npm scripts in `package.json` set its options.
 - Jest requires `NODE_OPTIONS=--experimental-vm-modules`.
 - The integration suites use a 60-second Jest timeout.
 - Place end-to-end scenarios under `tests/` and unit-level handler checks under `direct-tests/`.
 - Name test files after the feature under test (for example, `handlers.test.js`).
 - Keep test setup and teardown symmetrical. Name everything a test creates with `uniqueName()` from `tests/support/influx.js`, and delete only those resources.
 - Tests must never use the Docker API, and must never stop, kill or remove containers, processes or data they did not create. Integration tests get InfluxDB from `INFLUXDB_TEST_*`; a loopback URL is enforced.
-- Tests primarily use direct API communication for reliability. Server-process behavior is tested through direct process spawning and API verification.
+- A test must fail whenever the behavior it names is broken: no fallbacks to the InfluxDB API, no retries, and no conditional assertions.
+- Run the server in tests with `withMcpClient()` from `tests/support/mcp.js`. It passes only `PATH` and the given variables, and stops the server afterwards.
+- Check tool results with `toolText()`, which fails on `isError`, and resource reads with `resourceJson()`, which fails on an `error` key. Verify side effects through the InfluxDB API, by the ID a tool reports.
+- Tests fail if they log to `console.error` or `console.warn`. Take expected messages with `takeConsoleCalls()` from `tests/support/console.js` and assert on them.
 - Tests mock `src/config/env.js` and `src/utils/influxClient.js` using explicit export lists. Update these mocks when adding exports imported by handlers.
 - Add lightweight mocks when new code cannot be exercised end-to-end.
 - Before opening a PR, run `npm test` and `scripts/test-influx.sh` (or rely on CI for the integration suites) and verify that all tests pass.

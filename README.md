@@ -298,7 +298,7 @@ This structure allows for better maintainability, easier testing, and clearer se
 
 ## Testing
 
-`npm test` runs the suites that need neither Docker nor InfluxDB: the HTTP transport's Host and Origin validation, authentication and limits, configuration checks, the InfluxDB client's timeouts and size limits, and the CSV and Flux helpers.
+`npm test` runs the suites that need neither Docker nor InfluxDB: the HTTP transport's Host and Origin validation, authentication and limits, configuration checks, the InfluxDB client's timeouts and size limits, the advertised tools and prompts, and the CSV and Flux helpers.
 
 ```bash
 npm test
